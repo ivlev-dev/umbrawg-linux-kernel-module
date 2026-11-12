@@ -33,7 +33,7 @@ sudo vng --run --force-9p --cpus 12 --memory 3G -- \
     env FLOWS=12 ./scripts/bench/bench.sh umbrawg 0-11 tcp1420 10 3
 ```
 
-Кейсы: `tcp1420`, `udp1320`, `udp64`.
+Кейсы: `tcp1420`, `udp1320`, `udp1340`, `udp64`.
 
 Переменные:
 
@@ -41,11 +41,27 @@ sudo vng --run --force-9p --cpus 12 --memory 3G -- \
 - `UWG_DEV_OPTS` — доп. опции устройства, например
   `"jc 4 jmin 8 jmax 80 s1 50 s2 60 s3 70 s4 80 h1 100 h2 200 h3 300 h4 400"`;
 - `UWG_HP_KEY` — base64-ключ header protection; harness сам пишет его в файл;
+- `UWG_OPTS_FILE` — файл с аргументами `set` (по одному на строку),
+  например `profiles/obfs-full.opts`;
+- `UWG_REF_TOOL`, `UWG_REF_KIND`, `UWG_REF_MODULE` — внешняя сборка для
+  сравнения (режим `ref`);
 - `UWG_MODULE` — путь к `.ko` (для A/B разных сборок);
 - `UWG_MODULE_OPTS` — доп. параметры модуля, например `napi_weight=128`;
 - `UWG_LABEL` — метка в выводе.
 
 Формат вывода (TSV): `mode case cpu gbps pps busy%`.
+
+## Финальная матрица
+
+```sh
+sudo vng --run --force-9p --cpus 12 --pin 0-11 --memory 3G -- \
+  env UWG_REF_TOOL=/usr/bin/awg UWG_REF_KIND=amneziawg \
+      UWG_REF_MODULE=amneziawg UWG_HP_KEY=<base64> \
+      ./scripts/bench/final-matrix.sh
+```
+
+Матрица: `default` и `obfs`, TCP 1420 и UDP 1340, 1 и 12 потоков,
+сравнение с внешней сборкой (если заданы `UWG_REF_*`).
 
 ## Контроль
 

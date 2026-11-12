@@ -24,17 +24,26 @@ FLOWS=${FLOWS:-1}
 UWG_DEV_OPTS=${UWG_DEV_OPTS:-}
 UWG_HP_KEY=${UWG_HP_KEY:-}
 UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
+UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
 
-TOOL="$ROOT/scripts/dev/uwg"
-KIND=umbrawg
-MODULE=umbrawg
-MODULE_PATH=${UWG_MODULE:-$ROOT/src/umbrawg.ko}
-LABEL=${UWG_LABEL:-$MODE}
-
-[ "$MODE" = umbrawg ] || {
+if [ "$MODE" = umbrawg ]; then
+	TOOL="$ROOT/scripts/dev/uwg"
+	KIND=umbrawg
+	MODULE=umbrawg
+	MODULE_PATH=${UWG_MODULE:-$ROOT/src/umbrawg.ko}
+	REF=0
+elif [ "$MODE" = ref ]; then
+	TOOL=${UWG_REF_TOOL:?set UWG_REF_TOOL}
+	KIND=${UWG_REF_KIND:?set UWG_REF_KIND}
+	MODULE=${UWG_REF_MODULE:?set UWG_REF_MODULE}
+	MODULE_PATH=
+	REF=1
+else
 	echo "unknown mode: $MODE" >&2
 	exit 1
-}
+fi
+
+LABEL=${UWG_LABEL:-$MODE}
 [ -x "$TOOL" ] || { echo "tool not found: $TOOL" >&2; exit 1; }
 
 N1="uwb-$$-1"
@@ -53,11 +62,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if ! grep -q "^$MODULE " /proc/modules; then
-	for mod in udp_tunnel ip6_udp_tunnel libcurve25519; do
-		modprobe "$mod" 2>/dev/null || true
-	done
-	insmod "$MODULE_PATH" $UWG_MODULE_OPTS
-	LOADED=1
+	if [ "$REF" -eq 0 ]; then
+		for mod in udp_tunnel ip6_udp_tunnel libcurve25519; do
+			modprobe "$mod" 2>/dev/null || true
+		done
+		insmod "$MODULE_PATH" $UWG_MODULE_OPTS
+		LOADED=1
+	else
+		modprobe "$MODULE"
+	fi
 fi
 
 ip netns add "$N1"
@@ -91,11 +104,21 @@ fi
 
 # shellcheck disable=SC2086
 set -- private-key "$TMP/k1" listen-port "$P1" $UWG_DEV_OPTS
+if [ -n "$UWG_OPTS_FILE" ]; then
+	while IFS= read -r line; do
+		[ -n "$line" ] && set -- "$@" "$line"
+	done <"$UWG_OPTS_FILE"
+fi
 [ -n "$HP_FILE" ] && set -- "$@" header-protection-key "$HP_FILE"
 ip netns exec "$N1" "$TOOL" set uw0 "$@"
 
 # shellcheck disable=SC2086
 set -- private-key "$TMP/k2" listen-port "$P2" $UWG_DEV_OPTS
+if [ -n "$UWG_OPTS_FILE" ]; then
+	while IFS= read -r line; do
+		[ -n "$line" ] && set -- "$@" "$line"
+	done <"$UWG_OPTS_FILE"
+fi
 [ -n "$HP_FILE" ] && set -- "$@" header-protection-key "$HP_FILE"
 ip netns exec "$N2" "$TOOL" set uw0 "$@"
 
@@ -147,8 +170,12 @@ while [ "$rep" -le "$REPS" ]; do
 		bps=$(jq -r '.end.sum_received.bits_per_second' "$TMP/out.json")
 		len=1420
 		;;
-	udp1320|udp64)
-		if [ "$CASE" = udp1320 ]; then len=1320; else len=64; fi
+	udp1320|udp1340|udp64)
+		case "$CASE" in
+		udp1320) len=1320 ;;
+		udp1340) len=1340 ;;
+		*) len=64 ;;
+		esac
 		ip netns exec "$N1" taskset -c "$CPU" iperf3 -c 192.168.199.2 \
 			-p 5301 $PAR -u -b 0 -l "$len" -t "$DUR" -O 2 -J >"$TMP/out.json"
 		bps=$(jq -r '.end.sum.bits_per_second' "$TMP/out.json")
