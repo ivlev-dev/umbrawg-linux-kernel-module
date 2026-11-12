@@ -12,11 +12,16 @@
 
 #include <linux/kref.h>
 #include <linux/lockdep.h>
+#include <linux/moduleparam.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
 
 static struct kmem_cache *peer_cache;
 static atomic64_t peer_counter = ATOMIC64_INIT(0);
+
+static unsigned int uwg_napi_weight __read_mostly = 128;
+module_param_named(napi_weight, uwg_napi_weight, uint, 0644);
+MODULE_PARM_DESC(napi_weight, "per-peer NAPI poll weight");
 
 struct wg_peer *wg_peer_create(struct wg_device *wg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
@@ -59,7 +64,7 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	wg_peer_reset_last_sent_handshake(peer);
 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
 	netif_napi_add_weight(wg->dev, &peer->napi, wg_packet_rx_poll,
-			      NAPI_POLL_WEIGHT);
+			      uwg_napi_weight);
 	napi_enable(&peer->napi);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 	INIT_LIST_HEAD(&peer->allowedips_list);

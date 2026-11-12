@@ -49,7 +49,8 @@ peers/                peer lifecycle, allowedips, lookup
   - выбор фиксируется в `PACKET_CB(first)->parallel` на время обработки
     списка.
 - RX: per-CPU кольца decrypt-worker'ов с work-stealing (порядок и replay
-  window сохраняются per-peer NAPI).
+  window сохраняются per-peer NAPI); `napi_consume_skb` для отложенного free,
+  NAPI weight 128 (настраивается параметром `napi_weight`).
 - Конфиг (padding, junk, заголовки) читается датапасом без локов.
 - Очереди крипто-воркеров распределены по CPU (`struct ptr_ring __percpu`),
   producer-lock больше не общий; при пустом локальном кольце воркер забирает

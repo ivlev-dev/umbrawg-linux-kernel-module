@@ -184,7 +184,8 @@ void wg_timers_data_received(struct wg_peer *peer)
  */
 void wg_timers_any_authenticated_packet_sent(struct wg_peer *peer)
 {
-	timer_delete(&peer->timer_send_keepalive);
+	if (timer_pending(&peer->timer_send_keepalive))
+		timer_delete(&peer->timer_send_keepalive);
 }
 
 /* Should be called after any type of authenticated packet is received, whether
@@ -192,7 +193,8 @@ void wg_timers_any_authenticated_packet_sent(struct wg_peer *peer)
  */
 void wg_timers_any_authenticated_packet_received(struct wg_peer *peer)
 {
-	timer_delete(&peer->timer_new_handshake);
+	if (timer_pending(&peer->timer_new_handshake))
+		timer_delete(&peer->timer_new_handshake);
 }
 
 /* Should be called after a handshake initiation message is sent. */

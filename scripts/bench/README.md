@@ -42,6 +42,7 @@ sudo vng --run --force-9p --cpus 12 --memory 3G -- \
   `"jc 4 jmin 8 jmax 80 s1 50 s2 60 s3 70 s4 80 h1 100 h2 200 h3 300 h4 400"`;
 - `UWG_HP_KEY` — base64-ключ header protection; harness сам пишет его в файл;
 - `UWG_MODULE` — путь к `.ko` (для A/B разных сборок);
+- `UWG_MODULE_OPTS` — доп. параметры модуля, например `napi_weight=128`;
 - `UWG_LABEL` — метка в выводе.
 
 Формат вывода (TSV): `mode case cpu gbps pps busy%`.

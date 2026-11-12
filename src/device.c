@@ -184,7 +184,14 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	{
 		int cpu = smp_processor_id();
+		unsigned long now = jiffies;
 		int prev = READ_ONCE(peer->tx_cpu);
+
+		if (READ_ONCE(peer->tx_parallel) &&
+		    time_after(now, READ_ONCE(peer->tx_last_jiffies) + HZ)) {
+			WRITE_ONCE(peer->tx_parallel, false);
+			prev = -1;
+		}
 
 		if (prev < 0)
 			WRITE_ONCE(peer->tx_cpu, cpu);
@@ -192,6 +199,7 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 			WRITE_ONCE(peer->tx_parallel, true);
 			WRITE_ONCE(peer->tx_cpu, cpu);
 		}
+		WRITE_ONCE(peer->tx_last_jiffies, now);
 	}
 
 	mtu = skb_valid_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;

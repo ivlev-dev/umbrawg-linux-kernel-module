@@ -23,6 +23,7 @@ REPS=${5:-3}
 FLOWS=${FLOWS:-1}
 UWG_DEV_OPTS=${UWG_DEV_OPTS:-}
 UWG_HP_KEY=${UWG_HP_KEY:-}
+UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 
 TOOL="$ROOT/scripts/dev/uwg"
 KIND=umbrawg
@@ -55,7 +56,7 @@ if ! grep -q "^$MODULE " /proc/modules; then
 	for mod in udp_tunnel ip6_udp_tunnel libcurve25519; do
 		modprobe "$mod" 2>/dev/null || true
 	done
-	insmod "$MODULE_PATH"
+	insmod "$MODULE_PATH" $UWG_MODULE_OPTS
 	LOADED=1
 fi
 

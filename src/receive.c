@@ -520,8 +520,8 @@ dishonest_packet_size:
 	DEV_STATS_INC(dev, rx_errors);
 	DEV_STATS_INC(dev, rx_length_errors);
 	goto packet_processed;
-packet_processed:
-	dev_kfree_skb(skb);
+	packet_processed:
+	napi_consume_skb(skb, 1);
 }
 
 int wg_packet_rx_poll(struct napi_struct *napi, int budget)
@@ -573,7 +573,7 @@ next:
 		wg_noise_keypair_put(keypair, false);
 		wg_peer_put(peer);
 		if (unlikely(free))
-			dev_kfree_skb(skb);
+			napi_consume_skb(skb, budget);
 
 		if (++work_done >= budget)
 			break;

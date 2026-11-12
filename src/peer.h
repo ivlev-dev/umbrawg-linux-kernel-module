@@ -56,6 +56,7 @@ struct wg_peer {
 	struct hlist_node pubkey_hash;
 	atomic64_t rx_bytes, tx_bytes;
 	int tx_cpu;
+	unsigned long tx_last_jiffies;
 	bool tx_parallel;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
