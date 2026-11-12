@@ -4,14 +4,14 @@
 
 WIREGUARD_VERSION = 1.0.0
 OMIT_ENDPOINTS ?=
-AWG_NAME ?= umbra-wg
+UWG_NAME ?= umbrawg
 
 KERNELRELEASE ?= $(shell uname -r)
 KERNELDIR ?= /lib/modules/$(KERNELRELEASE)/build
 PREFIX ?= /usr
 DESTDIR ?=
 SRCDIR ?= $(PREFIX)/src
-DKMSDIR ?= $(SRCDIR)/umbra-wg-$(WIREGUARD_VERSION)
+DKMSDIR ?= $(SRCDIR)/umbrawg-$(WIREGUARD_VERSION)
 DEPMOD ?= depmod
 DEPMODBASEDIR ?= /
 
@@ -24,7 +24,7 @@ endif
 endif
 
 KMAKE = $(MAKE) -C $(KERNELDIR) M=$(PWD) \
-	AWG_NAME="$(AWG_NAME)" \
+	UWG_NAME="$(UWG_NAME)" \
 	$(if $(LLVM),LLVM=$(LLVM),) \
 	WIREGUARD_VERSION="$(WIREGUARD_VERSION)" \
 	OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"
@@ -40,7 +40,7 @@ module:
 	@$(KMAKE) modules
 
 module-debug:
-	@$(KMAKE) V=1 CONFIG_UMBRA_WG_DEBUG=y modules
+	@$(KMAKE) V=1 CONFIG_UMBRAWG_DEBUG=y modules
 
 clean:
 	@$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
@@ -52,7 +52,7 @@ module-install:
 install: module-install
 
 rwildcard=$(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
-DKMS_SOURCES := version.h Makefile Kbuild Kconfig dkms.conf awg_identity.h $(filter-out version.h wireguard.mod.c tests/% awg_identity.h,$(call rwildcard,,*.c *.h *.S *.include))
+DKMS_SOURCES := version.h Makefile Kbuild Kconfig dkms.conf uwg_identity.h $(filter-out version.h wireguard.mod.c tests/% uwg_identity.h,$(call rwildcard,,*.c *.h *.S *.include))
 dkms-install: $(DKMS_SOURCES)
 	@$(foreach f,$(DKMS_SOURCES),install -v -m0644 -D $(f) $(DESTDIR)$(DKMSDIR)/$(f);)
 
@@ -60,10 +60,10 @@ style:
 	$(KERNELDIR)/scripts/checkpatch.pl -f --max-line-length=4000 --codespell --color=always $(filter-out wireguard.mod.c,$(wildcard *.c)) $(wildcard *.h) $(wildcard selftest/*.c)
 
 check: clean
-	scan-build --html-title=umbra-wg -maxloop 100 --view --keep-going $(MAKE) module CONFIG_UMBRA_WG_DEBUG=y C=2 CF="-D__CHECK_ENDIAN__"
+	scan-build --html-title=umbrawg -maxloop 100 --view --keep-going $(MAKE) module CONFIG_UMBRAWG_DEBUG=y C=2 CF="-D__CHECK_ENDIAN__"
 
 coccicheck: clean
-	@$(MAKE) -C $(KERNELDIR) M=$(PWD) CONFIG_UMBRA_WG_DEBUG=y coccicheck MODE=report
+	@$(MAKE) -C $(KERNELDIR) M=$(PWD) CONFIG_UMBRAWG_DEBUG=y coccicheck MODE=report
 
 -include tests/debug.mk
 

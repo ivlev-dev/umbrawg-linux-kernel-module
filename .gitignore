@@ -21,7 +21,7 @@ src/tests/qemu/distfiles/
 *.nam
 *.til
 .cache.mk
-scripts/dev/awg-umbra
+scripts/dev/uwg
 .cache
 compile_commands.json
 .clangd

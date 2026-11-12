@@ -227,7 +227,7 @@ int wg_socket_send_buffer_to_peer(struct wg_peer *peer, void *buffer,
 		get_random_bytes(skb_put(skb, trailer_len), trailer_len);
 
 	if (crypto &&
-			awg_header_protection_init(&state, peer->device, crypto))
+			uwg_header_protection_init(&state, peer->device, crypto))
 		chacha20_crypt(&state, buffer, buffer, len);
 
 	return wg_socket_send_skb_to_peer(peer, skb, ds);
@@ -269,7 +269,7 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 		get_random_bytes(skb_put(skb, trailer_len), trailer_len);
 
 	if (crypto &&
-			awg_header_protection_init(&state, wg, crypto))
+			uwg_header_protection_init(&state, wg, crypto))
 		chacha20_crypt(&state, buffer, buffer, len);
 
 	if (endpoint.addr.sa_family == AF_INET)

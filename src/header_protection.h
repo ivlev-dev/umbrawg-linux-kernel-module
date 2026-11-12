@@ -1,5 +1,5 @@
-#ifndef _AWG_HEADER_PROTECTION
-#define _AWG_HEADER_PROTECTION
+#ifndef _UWG_HEADER_PROTECTION
+#define _UWG_HEADER_PROTECTION
 
 #include "messages.h"
 
@@ -15,22 +15,22 @@ enum header_protection_lengths {
 	HEADER_PROTECTION_NONCE_SIZE = 12,
 };
 
-struct awg_hp_key {
+struct uwg_hp_key {
 	u32 key[CHACHA_KEY_WORDS];
 	struct rcu_head rcu;
 };
 
 struct header_protection {
-	struct awg_hp_key __rcu *key;
+	struct uwg_hp_key __rcu *key;
 	struct mutex update_lock;
 };
 
-bool awg_header_protection_enabled(struct header_protection *p);
-bool awg_header_protection_init(struct chacha_state *state,
+bool uwg_header_protection_enabled(struct header_protection *p);
+bool uwg_header_protection_init(struct chacha_state *state,
 				struct wg_device *dev, const u8 *nonce);
-int awg_header_protection_set_key(struct header_protection *p,
+int uwg_header_protection_set_key(struct header_protection *p,
 				  const u8 *key);
-void awg_header_protection_get_key(struct header_protection *p, u8 *key);
-void awg_header_protection_clear(struct header_protection *p);
+void uwg_header_protection_get_key(struct header_protection *p, u8 *key);
+void uwg_header_protection_clear(struct header_protection *p);
 
 #endif

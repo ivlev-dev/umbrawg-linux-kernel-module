@@ -293,7 +293,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	crypto = skb_push(skb, padding);
 	get_random_bytes(crypto, padding);
 
-	if (awg_header_protection_init(&state, peer->device, crypto))
+	if (uwg_header_protection_init(&state, peer->device, crypto))
 		chacha20_crypt(&state, (u8*)header, (u8*)header, sizeof(*header));
 
 	/* Now we can encrypt the scattergather segments */

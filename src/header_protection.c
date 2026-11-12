@@ -4,16 +4,16 @@
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 
-bool awg_header_protection_enabled(struct header_protection *p)
+bool uwg_header_protection_enabled(struct header_protection *p)
 {
 	return rcu_access_pointer(p->key) != NULL;
 }
 
-bool awg_header_protection_init(struct chacha_state *state,
+bool uwg_header_protection_init(struct chacha_state *state,
 				struct wg_device *dev, const u8 *nonce)
 {
 	struct header_protection *p = &dev->header_protection;
-	struct awg_hp_key *key;
+	struct uwg_hp_key *key;
 	u8 iv[16];
 	bool res = false;
 
@@ -31,9 +31,9 @@ bool awg_header_protection_init(struct chacha_state *state,
 	return res;
 }
 
-int awg_header_protection_set_key(struct header_protection *p, const u8 *key)
+int uwg_header_protection_set_key(struct header_protection *p, const u8 *key)
 {
-	struct awg_hp_key *new, *old;
+	struct uwg_hp_key *new, *old;
 	int i;
 
 	new = kmalloc(sizeof(*new), GFP_KERNEL);
@@ -55,9 +55,9 @@ int awg_header_protection_set_key(struct header_protection *p, const u8 *key)
 	return 0;
 }
 
-void awg_header_protection_get_key(struct header_protection *p, u8 *key)
+void uwg_header_protection_get_key(struct header_protection *p, u8 *key)
 {
-	struct awg_hp_key *hp;
+	struct uwg_hp_key *hp;
 	int i;
 
 	rcu_read_lock();
@@ -71,9 +71,9 @@ void awg_header_protection_get_key(struct header_protection *p, u8 *key)
 	rcu_read_unlock();
 }
 
-void awg_header_protection_clear(struct header_protection *p)
+void uwg_header_protection_clear(struct header_protection *p)
 {
-	struct awg_hp_key *old;
+	struct uwg_hp_key *old;
 
 	mutex_lock(&p->update_lock);
 	old = rcu_dereference_protected(p->key,

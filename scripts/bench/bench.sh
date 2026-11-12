@@ -1,12 +1,11 @@
 #!/bin/sh
-# Throughput / interop measurement for amneziawg (old), umbra-wg (new) or a
-# mixed pair. Everything runs inside two private network namespaces; the host
-# network configuration is never touched.
+# Throughput measurement for umbrawg. Everything runs inside two private
+# network namespaces; the host network configuration is never touched.
 #
-# usage: bench.sh <old|new|cross|cross2> <cpu> <tcp1420|udp1320|udp64> [sec] [reps]
+# usage: bench.sh <umbrawg> <cpu> <tcp1420|udp1320|udp64> [sec] [reps]
 # env:   FLOWS=12                 parallel iperf3 streams
-#        AWG_DEV_OPTS="s1 50 ..." extra device options for both sides
-#        AWG_HP_KEY="<base64>"    header protection key for both sides
+#        UWG_DEV_OPTS="s1 50 ..." extra device options for both sides
+#        UWG_HP_KEY="<base64>"    header protection key for both sides
 set -eu
 umask 077
 
@@ -22,40 +21,23 @@ CASE=${3:?case}
 DUR=${4:-10}
 REPS=${5:-3}
 FLOWS=${FLOWS:-1}
-AWG_DEV_OPTS=${AWG_DEV_OPTS:-}
-AWG_HP_KEY=${AWG_HP_KEY:-}
+UWG_DEV_OPTS=${UWG_DEV_OPTS:-}
+UWG_HP_KEY=${UWG_HP_KEY:-}
 
-AWG_OLD=$(command -v awg)
-AWG_NEW="$ROOT/scripts/dev/awg-umbra"
+TOOL="$ROOT/scripts/dev/uwg"
+KIND=umbrawg
+MODULE=umbrawg
 
-NEED_OLD=0
-NEED_NEW=0
-case "$MODE" in
-old)
-	K1=amneziawg; K2=amneziawg; T1=$AWG_OLD; T2=$AWG_OLD; NEED_OLD=1
-	;;
-new)
-	K1=umbra-wg; K2=umbra-wg; T1=$AWG_NEW; T2=$AWG_NEW; NEED_NEW=1
-	;;
-cross)
-	K1=amneziawg; K2=umbra-wg; T1=$AWG_OLD; T2=$AWG_NEW; NEED_OLD=1; NEED_NEW=1
-	;;
-cross2)
-	K1=umbra-wg; K2=amneziawg; T1=$AWG_NEW; T2=$AWG_OLD; NEED_OLD=1; NEED_NEW=1
-	;;
-*)
+[ "$MODE" = umbrawg ] || {
 	echo "unknown mode: $MODE" >&2
 	exit 1
-	;;
-esac
-
-[ -x "$T1" ] || { echo "tool not found: $T1" >&2; exit 1; }
-[ -x "$T2" ] || { echo "tool not found: $T2" >&2; exit 1; }
+}
+[ -x "$TOOL" ] || { echo "tool not found: $TOOL" >&2; exit 1; }
 
 N1="uwb-$$-1"
 N2="uwb-$$-2"
 TMP=$(mktemp -d)
-NEW_LOADED=0
+LOADED=0
 SPID=
 
 cleanup() {
@@ -63,19 +45,16 @@ cleanup() {
 	ip netns del "$N1" 2>/dev/null || true
 	ip netns del "$N2" 2>/dev/null || true
 	rm -rf "$TMP"
-	[ "$NEW_LOADED" -eq 1 ] && rmmod umbra_wg 2>/dev/null || true
+	[ "$LOADED" -eq 1 ] && rmmod "$MODULE" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-if [ "$NEED_OLD" -eq 1 ] && ! grep -q '^amneziawg ' /proc/modules; then
-	modprobe amneziawg
-fi
-if [ "$NEED_NEW" -eq 1 ] && ! grep -q '^umbra_wg ' /proc/modules; then
+if ! grep -q "^$MODULE " /proc/modules; then
 	for mod in udp_tunnel ip6_udp_tunnel libcurve25519; do
 		modprobe "$mod" 2>/dev/null || true
 	done
-	insmod "$ROOT/src/umbra-wg.ko"
-	NEW_LOADED=1
+	insmod "$ROOT/src/umbrawg.ko"
+	LOADED=1
 fi
 
 ip netns add "$N1"
@@ -90,36 +69,36 @@ ip -n "$N2" link set uwv1 up
 ip -n "$N1" link set lo up
 ip -n "$N2" link set lo up
 
-ip -n "$N1" link add uw0 type "$K1"
-ip -n "$N2" link add uw0 type "$K2"
+ip -n "$N1" link add uw0 type "$KIND"
+ip -n "$N2" link add uw0 type "$KIND"
 
-"$T1" genkey >"$TMP/k1"
-"$T1" pubkey <"$TMP/k1" >"$TMP/p1"
-"$T2" genkey >"$TMP/k2"
-"$T2" pubkey <"$TMP/k2" >"$TMP/p2"
+"$TOOL" genkey >"$TMP/k1"
+"$TOOL" pubkey <"$TMP/k1" >"$TMP/p1"
+"$TOOL" genkey >"$TMP/k2"
+"$TOOL" pubkey <"$TMP/k2" >"$TMP/p2"
 
 P1=$((20000 + ($$ % 10000)))
 P2=$((35000 + ($$ % 10000)))
 
 HP_FILE=
-if [ -n "$AWG_HP_KEY" ]; then
-	printf '%s\n' "$AWG_HP_KEY" >"$TMP/hp"
+if [ -n "$UWG_HP_KEY" ]; then
+	printf '%s\n' "$UWG_HP_KEY" >"$TMP/hp"
 	HP_FILE="$TMP/hp"
 fi
 
 # shellcheck disable=SC2086
-set -- private-key "$TMP/k1" listen-port "$P1" $AWG_DEV_OPTS
+set -- private-key "$TMP/k1" listen-port "$P1" $UWG_DEV_OPTS
 [ -n "$HP_FILE" ] && set -- "$@" header-protection-key "$HP_FILE"
-ip netns exec "$N1" "$T1" set uw0 "$@"
+ip netns exec "$N1" "$TOOL" set uw0 "$@"
 
 # shellcheck disable=SC2086
-set -- private-key "$TMP/k2" listen-port "$P2" $AWG_DEV_OPTS
+set -- private-key "$TMP/k2" listen-port "$P2" $UWG_DEV_OPTS
 [ -n "$HP_FILE" ] && set -- "$@" header-protection-key "$HP_FILE"
-ip netns exec "$N2" "$T2" set uw0 "$@"
+ip netns exec "$N2" "$TOOL" set uw0 "$@"
 
-ip netns exec "$N1" "$T1" set uw0 peer "$(cat "$TMP/p2")" \
+ip netns exec "$N1" "$TOOL" set uw0 peer "$(cat "$TMP/p2")" \
 	allowed-ips 192.168.199.2/32 endpoint 10.99.0.2:"$P2"
-ip netns exec "$N2" "$T2" set uw0 peer "$(cat "$TMP/p1")" \
+ip netns exec "$N2" "$TOOL" set uw0 peer "$(cat "$TMP/p1")" \
 	allowed-ips 192.168.199.1/32 endpoint 10.99.0.1:"$P1"
 
 ip -n "$N1" link set uw0 up

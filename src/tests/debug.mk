@@ -16,9 +16,9 @@ MAYBE_DEBUG :=
 endif
 
 insert: debug
-	-modinfo -F depends umbra-wg.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
-	-sudo rmmod umbra_wg
-	-sudo insmod umbra-wg.ko
+	-modinfo -F depends umbrawg.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
+	-sudo rmmod umbrawg
+	-sudo insmod umbrawg.ko
 
 test: insert
 	sudo PATH="$$PATH:/usr/sbin:/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin" ./tests/netns.sh

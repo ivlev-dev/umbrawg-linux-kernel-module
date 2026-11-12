@@ -11,7 +11,7 @@
 #include "queueing.h"
 #include "messages.h"
 #include "type.h"
-#include "awg_identity.h"
+#include "uwg_identity.h"
 #include "uapi/wireguard.h"
 #include <linux/if.h>
 #include <net/genetlink.h>
@@ -109,7 +109,7 @@ static struct wg_device *lookup_interface(struct nlattr **attrs,
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 	if (!dev->rtnl_link_ops || !dev->rtnl_link_ops->kind ||
-	    strcmp(dev->rtnl_link_ops->kind, AWG_NAME)) {
+	    strcmp(dev->rtnl_link_ops->kind, UWG_NAME)) {
 		dev_put(dev);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
@@ -479,8 +479,8 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				nla_put_string(skb, WGDEVICE_A_I5, wg->ispecs[4].desc)))
 			goto out;
 
-		if (awg_header_protection_enabled(&wg->header_protection)) {
-			awg_header_protection_get_key(&wg->header_protection, buf);
+		if (uwg_header_protection_enabled(&wg->header_protection)) {
+			uwg_header_protection_get_key(&wg->header_protection, buf);
 			if (nla_put(skb, WGDEVICE_A_HEADER_PROTECTION_KEY,
 				    HEADER_PROTECTION_KEY_SIZE, buf))
 				goto out;
@@ -766,7 +766,7 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
 
-	has_protection = awg_header_protection_enabled(&wg->header_protection) ||
+	has_protection = uwg_header_protection_enabled(&wg->header_protection) ||
 		info->attrs[WGDEVICE_A_HEADER_PROTECTION_KEY];
 
 	if (info->attrs[WGDEVICE_A_FLAGS])
@@ -980,7 +980,7 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
-		ret = awg_header_protection_set_key(&wg->header_protection,
+		ret = uwg_header_protection_set_key(&wg->header_protection,
 			nla_data(info->attrs[WGDEVICE_A_HEADER_PROTECTION_KEY]));
 		if (ret)
 			goto out;
@@ -1099,7 +1099,7 @@ static struct genl_family genl_family __ro_after_init = {
 	.ops = genl_ops,
 	.n_ops = ARRAY_SIZE(genl_ops),
 	.resv_start_op = WG_CMD_SET_DEVICE + 1,
-	.name = AWG_NAME,
+	.name = UWG_NAME,
 	.version = WG_GENL_VERSION,
 	.maxattr = WGDEVICE_A_MAX,
 	.module = THIS_MODULE,

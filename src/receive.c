@@ -25,7 +25,7 @@ static void update_rx_stats(struct wg_peer *peer, size_t len)
 	atomic64_add(len, &peer->rx_bytes);
 }
 
-static inline __le32 awg_decoded_type(u8 data[4], u8 hash[4]) {
+static inline __le32 uwg_decoded_type(u8 data[4], u8 hash[4]) {
 	u8 buf[4];
 	buf[0] = data[0] ^ hash[0];
 	buf[1] = data[1] ^ hash[1];
@@ -34,7 +34,7 @@ static inline __le32 awg_decoded_type(u8 data[4], u8 hash[4]) {
 	return ((struct message_header*)buf)->type;
 }
 
-static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
+static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	struct wg_device *wg, u8 hash[4], u16 *res_padding, u32 *res_type)
 {
 	void *ptr;
@@ -48,7 +48,7 @@ static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(wg->init_header,
-			le32_to_cpu(awg_decoded_type(ptr, hash)))) {
+			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_INITIATION;
 		return sizeof(struct message_handshake_initiation);
@@ -59,7 +59,7 @@ static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(wg->resp_header,
-			le32_to_cpu(awg_decoded_type(ptr, hash)))) {
+			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_RESPONSE;
 		return sizeof(struct message_handshake_response);
@@ -70,7 +70,7 @@ static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(wg->cookie_header, 
-			le32_to_cpu(awg_decoded_type(ptr, hash)))) {
+			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_COOKIE;
 		return sizeof(struct message_handshake_cookie);
@@ -81,7 +81,7 @@ static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
 	if (skb->len >= expected_len &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(wg->transport_header,
-			le32_to_cpu(awg_decoded_type(ptr, hash)))) {
+			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_DATA;
 		return sizeof(struct message_data);
@@ -135,19 +135,19 @@ static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 		/* Final len does not agree with calculated len */
 		return -EINVAL;
 
-	if (awg_header_protection_enabled(&wg->header_protection)) {
+	if (uwg_header_protection_enabled(&wg->header_protection)) {
 		ptr = skb_header_pointer(skb, 0, sizeof(buf), buf);
 		if (!ptr)
 			return -EINVAL;
 
-		protected = awg_header_protection_init(&state, wg, ptr);
+		protected = uwg_header_protection_init(&state, wg, ptr);
 		if (protected) {
 			chacha20_crypt(&state, hash, hash, sizeof(hash));
 			state.x[12] = 0; // rewind counter to 0
 		}
 	}
 
-	header_len = awg_determine_type_and_padding(skb, wg, hash, &padding, &type);
+	header_len = uwg_determine_type_and_padding(skb, wg, hash, &padding, &type);
 	if (unlikely(!header_len))
 		return -EINVAL;
 

@@ -1,4 +1,4 @@
-config UMBRA_WG
+config UMBRAWG
 	tristate "IP: UmbraWG secure network tunnel"
 	depends on NET && INET
 	depends on IPV6 || !IPV6
@@ -19,9 +19,9 @@ config UMBRA_WG
 	  It's safe to say Y or M here, as the driver is very lightweight and
 	  is only in use when an administrator chooses to add an interface.
 
-config UMBRA_WG_DEBUG
+config UMBRAWG_DEBUG
 	bool "Debugging checks and verbose messages"
-	depends on UMBRA_WG
+	depends on UMBRAWG
 	help
 	  This will write log messages for handshake and other events
 	  that occur for a WireGuard interface. It will also perform some

@@ -1,5 +1,5 @@
-#ifndef _AWG_JUNK_H
-#define _AWG_JUNK_H
+#ifndef _UWG_JUNK_H
+#define _UWG_JUNK_H
 
 #include <linux/list.h>
 #include <linux/mutex.h>

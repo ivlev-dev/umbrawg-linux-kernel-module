@@ -11,7 +11,7 @@
 #include "ratelimiter.h"
 #include "peer.h"
 #include "messages.h"
-#include "awg_identity.h"
+#include "uwg_identity.h"
 
 #include <linux/smp.h>
 #include <linux/module.h>
@@ -281,7 +281,7 @@ static void wg_destruct(struct net_device *dev)
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
 	wg_ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(wg->static_identity));
-	awg_header_protection_clear(&wg->header_protection);
+	uwg_header_protection_clear(&wg->header_protection);
 	kvfree(wg->index_hashtable);
 	kvfree(wg->peer_hashtable);
 	mutex_unlock(&wg->device_update_lock);
@@ -290,7 +290,7 @@ static void wg_destruct(struct net_device *dev)
 	free_netdev(dev);
 }
 
-static const struct device_type device_type = { .name = AWG_NAME };
+static const struct device_type device_type = { .name = UWG_NAME };
 
 static void wg_setup(struct net_device *dev)
 {
@@ -362,17 +362,17 @@ static int wg_newlink(struct net_device *dev,
 	if (!wg->index_hashtable)
 		goto err_free_peer_hashtable;
 
-	wg->handshake_receive_wq = alloc_workqueue(AWG_NAME "-kex-%s",
+	wg->handshake_receive_wq = alloc_workqueue(UWG_NAME "-kex-%s",
 			WQ_CPU_INTENSIVE | WQ_FREEZABLE | WQ_PERCPU, 0, dev->name);
 	if (!wg->handshake_receive_wq)
 		goto err_free_index_hashtable;
 
-	wg->handshake_send_wq = alloc_workqueue(AWG_NAME "-kex-%s",
+	wg->handshake_send_wq = alloc_workqueue(UWG_NAME "-kex-%s",
 			WQ_UNBOUND | WQ_FREEZABLE, 0, dev->name);
 	if (!wg->handshake_send_wq)
 		goto err_destroy_handshake_receive;
 
-	wg->packet_crypt_wq = alloc_workqueue(AWG_NAME "-crypt-%s",
+	wg->packet_crypt_wq = alloc_workqueue(UWG_NAME "-crypt-%s",
 			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU, 0, dev->name);
 	if (!wg->packet_crypt_wq)
 		goto err_destroy_handshake_send;
@@ -433,7 +433,7 @@ err_free_peer_hashtable:
 }
 
 static struct rtnl_link_ops link_ops __read_mostly = {
-	.kind			= AWG_NAME,
+	.kind			= UWG_NAME,
 	.priv_size		= sizeof(struct wg_device),
 	.setup			= wg_setup,
 	.newlink		= wg_newlink,
