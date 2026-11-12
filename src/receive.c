@@ -22,7 +22,7 @@
 static void update_rx_stats(struct wg_peer *peer, size_t len)
 {
 	dev_sw_netstats_rx_add(peer->device->dev, len);
-	atomic64_add(len, &peer->rx_bytes);
+	this_cpu_add(peer->stats->rx_bytes, len);
 }
 
 static inline __le32 uwg_decoded_type(u8 data[4], u8 hash[4]) {

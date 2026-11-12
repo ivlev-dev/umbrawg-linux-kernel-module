@@ -192,7 +192,7 @@ int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb, u8 ds)
 	else
 		dev_kfree_skb(skb);
 	if (likely(!ret))
-		atomic64_add(skb_len, &peer->tx_bytes);
+		this_cpu_add(peer->stats->tx_bytes, skb_len);
 
 	return ret;
 }

@@ -330,10 +330,10 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 		    nla_put_u32(skb, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
 				peer->persistent_keepalive_interval) ||
 		    nla_put_u64_64bit(skb, WGPEER_A_TX_BYTES,
-				      atomic64_read(&peer->tx_bytes),
+				      wg_peer_bytes(peer, false),
 				      WGPEER_A_UNSPEC) ||
 		    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES,
-				      atomic64_read(&peer->rx_bytes),
+				      wg_peer_bytes(peer, true),
 				      WGPEER_A_UNSPEC) ||
 		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
 			goto err;

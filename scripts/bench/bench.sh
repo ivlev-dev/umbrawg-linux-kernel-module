@@ -209,6 +209,10 @@ while [ "$rep" -le "$REPS" ]; do
 	sleep 0.3
 done
 
+if [ -n "${UWG_STATS:-}" ]; then
+	ip netns exec "$N1" "$TOOL" show uw0 | sed -n '/peer/,/^$/p' | head -12
+fi
+
 awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '
 { b[NR] = $2; p[NR] = $3; u[NR] = $4; l[NR] = $5 }
 END {

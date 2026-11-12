@@ -37,6 +37,11 @@ struct endpoint {
 	};
 };
 
+struct uwg_peer_stats {
+	u64 rx_bytes;
+	u64 tx_bytes;
+};
+
 struct wg_peer {
 	struct wg_device *device;
 	struct prev_queue tx_queue, rx_queue;
@@ -58,7 +63,7 @@ struct wg_peer {
 	struct work_struct transmit_handshake_work, clear_peer_work, transmit_packet_work;
 	struct cookie latest_cookie;
 	struct hlist_node pubkey_hash;
-	atomic64_t rx_bytes, tx_bytes;
+	struct uwg_peer_stats __percpu *stats;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
 	struct timer_list timer_persistent_keepalive;
@@ -76,6 +81,7 @@ struct wg_peer {
 	unsigned int udp_window;
 };
 
+u64 wg_peer_bytes(struct wg_peer *peer, bool rx);
 struct wg_peer *wg_peer_create(struct wg_device *wg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);

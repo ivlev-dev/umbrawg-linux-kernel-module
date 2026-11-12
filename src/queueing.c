@@ -77,6 +77,14 @@ void wg_packet_queue_free(struct crypt_queue *queue, bool purge)
 	queue->ring = NULL;
 }
 
+static void wg_prev_queue_dec(struct prev_queue *queue)
+{
+	int count = READ_ONCE(queue->count);
+
+	if (likely(count > 0))
+		WRITE_ONCE(queue->count, count - 1);
+}
+
 #define NEXT(skb) ((skb)->prev)
 #define STUB(queue) ((struct sk_buff *)&queue->empty)
 
@@ -85,7 +93,7 @@ void wg_prev_queue_init(struct prev_queue *queue)
 	NEXT(STUB(queue)) = NULL;
 	queue->head = queue->tail = STUB(queue);
 	queue->peeked = NULL;
-	atomic_set(&queue->count, 0);
+	WRITE_ONCE(queue->count, 0);
 	BUILD_BUG_ON(
 		offsetof(struct sk_buff, next) != offsetof(struct prev_queue, empty.next) -
 							offsetof(struct prev_queue, empty) ||
@@ -101,8 +109,11 @@ static void __wg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *sk
 
 bool wg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *skb)
 {
-	if (!atomic_add_unless(&queue->count, 1, MAX_QUEUED_PACKETS))
+	int count = READ_ONCE(queue->count);
+
+	if (unlikely(count >= MAX_QUEUED_PACKETS))
 		return false;
+	WRITE_ONCE(queue->count, count + 1);
 	__wg_prev_queue_enqueue(queue, skb);
 	return true;
 }
@@ -120,7 +131,7 @@ struct sk_buff *wg_prev_queue_dequeue(struct prev_queue *queue)
 	}
 	if (next) {
 		queue->tail = next;
-		atomic_dec(&queue->count);
+		wg_prev_queue_dec(queue);
 		return tail;
 	}
 	if (tail != READ_ONCE(queue->head))
@@ -129,7 +140,7 @@ struct sk_buff *wg_prev_queue_dequeue(struct prev_queue *queue)
 	next = smp_load_acquire(&NEXT(tail));
 	if (next) {
 		queue->tail = next;
-		atomic_dec(&queue->count);
+		wg_prev_queue_dec(queue);
 		return tail;
 	}
 	return NULL;

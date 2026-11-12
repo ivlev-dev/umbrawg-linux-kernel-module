@@ -42,8 +42,11 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	peer = kmem_cache_zalloc(peer_cache, GFP_KERNEL);
 	if (unlikely(!peer))
 		return ERR_PTR(ret);
-	if (unlikely(dst_cache_init(&peer->endpoint_cache, GFP_KERNEL)))
+	peer->stats = alloc_percpu(struct uwg_peer_stats);
+	if (unlikely(!peer->stats))
 		goto err;
+	if (unlikely(dst_cache_init(&peer->endpoint_cache, GFP_KERNEL)))
+		goto err_stats;
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
 
 	peer->device = wg;
@@ -63,8 +66,6 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	wg_prev_queue_init(&peer->rx_queue);
 	seqlock_init(&peer->endpoint_lock);
 	kref_init(&peer->refcount);
-	atomic64_set(&peer->rx_bytes, 0);
-	atomic64_set(&peer->tx_bytes, 0);
 	skb_queue_head_init(&peer->staged_packet_queue);
 	wg_peer_reset_last_sent_handshake(peer);
 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
@@ -78,9 +79,24 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	pr_debug("%s: Peer %llu created\n", wg->dev->name, peer->internal_id);
 	return peer;
 
+err_stats:
+	free_percpu(peer->stats);
 err:
 	kmem_cache_free(peer_cache, peer);
 	return ERR_PTR(ret);
+}
+
+u64 wg_peer_bytes(struct wg_peer *peer, bool rx)
+{
+	struct uwg_peer_stats *stats;
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		stats = per_cpu_ptr(peer->stats, cpu);
+		sum += rx ? stats->rx_bytes : stats->tx_bytes;
+	}
+	return sum;
 }
 
 struct wg_peer *wg_peer_get_maybe_zero(struct wg_peer *peer)
@@ -203,6 +219,7 @@ static void rcu_release(struct rcu_head *rcu)
 	struct wg_peer *peer = container_of(rcu, struct wg_peer, rcu);
 
 	dst_cache_destroy(&peer->endpoint_cache);
+	free_percpu(peer->stats);
 	WARN_ON(wg_prev_queue_peek(&peer->tx_queue) || wg_prev_queue_peek(&peer->rx_queue));
 
 	/* The final zeroing takes care of clearing any remaining handshake key
