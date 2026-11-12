@@ -41,10 +41,14 @@ struct wg_peer {
 	struct wg_device *device;
 	struct prev_queue tx_queue, rx_queue;
 	struct sk_buff_head staged_packet_queue;
-	int serial_work_cpu;
 	bool is_dead;
 	bool timer_need_another_keepalive;
 	bool sent_lastminute_handshake;
+	int serial_work_cpu;
+	int tx_cpu;
+	unsigned long tx_flip_jiffies;
+	unsigned long tx_kick;
+	bool tx_parallel;
 	struct noise_keypairs keypairs;
 	struct endpoint endpoint;
 	struct dst_cache endpoint_cache;
@@ -55,9 +59,6 @@ struct wg_peer {
 	struct cookie latest_cookie;
 	struct hlist_node pubkey_hash;
 	atomic64_t rx_bytes, tx_bytes;
-	int tx_cpu;
-	unsigned long tx_last_jiffies;
-	bool tx_parallel;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
 	struct timer_list timer_persistent_keepalive;

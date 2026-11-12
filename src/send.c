@@ -356,55 +356,91 @@ void wg_packet_tx_worker(struct work_struct *work)
 	enum packet_state state;
 	struct sk_buff *first;
 
-	while ((first = wg_prev_queue_peek(&peer->tx_queue)) != NULL &&
-	       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
-		       PACKET_STATE_UNCRYPTED) {
-		wg_prev_queue_drop_peeked(&peer->tx_queue);
-		keypair = PACKET_CB(first)->keypair;
+	for (;;) {
+		while ((first = wg_prev_queue_peek(&peer->tx_queue)) != NULL &&
+		       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
+			       PACKET_STATE_UNCRYPTED) {
+			wg_prev_queue_drop_peeked(&peer->tx_queue);
+			keypair = PACKET_CB(first)->keypair;
 
-		if (likely(state == PACKET_STATE_CRYPTED))
-			wg_packet_create_data_done(peer, first);
-		else
-			kfree_skb_list(first);
+			if (likely(state == PACKET_STATE_CRYPTED))
+				wg_packet_create_data_done(peer, first);
+			else
+				kfree_skb_list(first);
 
-		wg_noise_keypair_put(keypair, false);
-		wg_peer_put(peer);
-		if (need_resched())
-			cond_resched();
+			wg_noise_keypair_put(keypair, false);
+			wg_peer_put(peer);
+			if (need_resched())
+				cond_resched();
+		}
+
+		if (wg_peer_tx_poll(peer))
+			continue;
+
+		wg_peer_tx_release(peer);
+		if (!wg_peer_tx_ready(peer))
+			break;
+		set_bit(WG_WORK_KICKED, &peer->tx_kick);
 	}
 }
 
 void wg_packet_encrypt_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct multicore_worker,
-						 work)->ptr;
+	struct multicore_worker *worker = container_of(work,
+						      struct multicore_worker, work);
+	struct crypt_queue *queue = worker->ptr;
+	void *batch[WG_CRYPT_BATCH];
 	struct sk_buff *first, *skb, *next;
+	int i, count;
 
-	while ((first = wg_crypt_queue_consume(queue)) != NULL) {
-		struct wg_peer *peer = PACKET_PEER(first);
-		struct noise_keypair *keypair = PACKET_CB(first)->keypair;
-		bool parallel = PACKET_CB(first)->parallel;
-		bool ok = true;
+	for (;;) {
+		count = wg_crypt_queue_drain_local(queue, batch, WG_CRYPT_BATCH);
+		if (!count) {
+			if (wg_crypt_queue_poll(queue))
+				continue;
 
-		skb_list_walk_safe(first, skb, next) {
-			if (likely(encrypt_packet(skb, keypair))) {
-				wg_reset_packet(skb, true);
-			} else {
-				ok = false;
-				break;
+			wg_multicore_worker_release(worker);
+			count = wg_crypt_queue_steal_batch(queue, batch,
+							  WG_CRYPT_BATCH);
+			if (!count) {
+				if (wg_crypt_queue_empty(queue))
+					break;
+				wg_multicore_worker_retain(worker);
+				continue;
 			}
+			wg_multicore_worker_retain(worker);
 		}
 
-		if (parallel) {
-			if (likely(ok))
-				wg_packet_create_data_done(peer, first);
-			else
-				kfree_skb_list(first);
-			wg_noise_keypair_put(keypair, false);
-			wg_peer_put(peer);
-		} else {
-			wg_queue_enqueue_per_peer_tx(first, ok ? PACKET_STATE_CRYPTED :
-								PACKET_STATE_DEAD);
+		for (i = 0; i < count; ++i) {
+			struct wg_peer *peer;
+			struct noise_keypair *keypair;
+			bool parallel, ok = true;
+
+			first = batch[i];
+			peer = PACKET_PEER(first);
+			keypair = PACKET_CB(first)->keypair;
+			parallel = PACKET_CB(first)->parallel;
+
+			skb_list_walk_safe(first, skb, next) {
+				if (likely(encrypt_packet(skb, keypair))) {
+					wg_reset_packet(skb, true);
+				} else {
+					ok = false;
+					break;
+				}
+			}
+
+			if (parallel) {
+				if (likely(ok))
+					wg_packet_create_data_done(peer, first);
+				else
+					kfree_skb_list(first);
+				wg_noise_keypair_put(keypair, false);
+				wg_peer_put(peer);
+			} else {
+				wg_queue_enqueue_per_peer_tx(first, ok ? PACKET_STATE_CRYPTED :
+									PACKET_STATE_DEAD);
+			}
 		}
 
 		if (need_resched())

@@ -7,6 +7,7 @@
 #define _WG_QUEUEING_H
 
 #include "peer.h"
+#include <linux/cpumask.h>
 #include <linux/percpu.h>
 #include <linux/smp.h>
 #include <linux/types.h>
@@ -160,23 +161,95 @@ static inline void wg_prev_queue_drop_peeked(struct prev_queue *queue)
 	queue->peeked = NULL;
 }
 
-static inline struct sk_buff *wg_crypt_queue_consume(struct crypt_queue *queue)
-{
-	struct sk_buff *skb;
-	int cpu, self = raw_smp_processor_id();
+#define WG_CRYPT_BATCH 32
 
-	skb = ptr_ring_consume_bh(per_cpu_ptr(queue->ring, self));
-	if (skb)
-		return skb;
+extern unsigned int wg_poll_iters;
+
+#define WG_WORK_KICKED 0
+
+static inline void
+wg_multicore_worker_kick(struct multicore_worker __percpu *workers, int cpu,
+			 struct workqueue_struct *wq)
+{
+	struct multicore_worker *worker = per_cpu_ptr(workers, cpu);
+
+	if (!test_and_set_bit(WG_WORK_KICKED, &worker->kick))
+		queue_work_on(cpu, wq, &worker->work);
+}
+
+static inline void wg_multicore_worker_release(struct multicore_worker *worker)
+{
+	clear_bit_unlock(WG_WORK_KICKED, &worker->kick);
+	smp_mb__after_atomic();
+}
+
+static inline void wg_multicore_worker_retain(struct multicore_worker *worker)
+{
+	set_bit(WG_WORK_KICKED, &worker->kick);
+}
+
+static inline bool wg_crypt_queue_local_empty(struct crypt_queue *queue)
+{
+	return __ptr_ring_empty(per_cpu_ptr(queue->ring,
+					    raw_smp_processor_id()));
+}
+
+static inline bool wg_crypt_queue_empty(struct crypt_queue *queue)
+{
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+		if (!__ptr_ring_empty(per_cpu_ptr(queue->ring, cpu)))
+			return false;
+	}
+	return true;
+}
+
+static inline int
+__wg_crypt_queue_drain(struct crypt_queue *queue, int cpu,
+		       void **batch, int n)
+{
+	return ptr_ring_consume_batched_bh(per_cpu_ptr(queue->ring, cpu),
+					   batch, n);
+}
+
+static inline int wg_crypt_queue_drain_local(struct crypt_queue *queue,
+					     void **batch, int n)
+{
+	return __wg_crypt_queue_drain(queue, raw_smp_processor_id(), batch, n);
+}
+
+static inline int wg_crypt_queue_steal_batch(struct crypt_queue *queue,
+					     void **batch, int n)
+{
+	int cpu, got, self = raw_smp_processor_id();
 
 	for_each_online_cpu(cpu) {
 		if (cpu == self)
 			continue;
-		skb = ptr_ring_consume_bh(per_cpu_ptr(queue->ring, cpu));
-		if (skb)
-			return skb;
+		got = __wg_crypt_queue_drain(queue, cpu, batch, n);
+		if (got)
+			return got;
 	}
-	return NULL;
+	return 0;
+}
+
+static inline bool wg_crypt_queue_poll(struct crypt_queue *queue)
+{
+	unsigned int i, iters;
+
+	if (!READ_ONCE(queue->poll))
+		return false;
+	iters = READ_ONCE(wg_poll_iters);
+
+	for (i = 0; i < iters; ++i) {
+		if (!wg_crypt_queue_local_empty(queue))
+			return true;
+		if (need_resched())
+			return false;
+		cpu_relax();
+	}
+	return false;
 }
 
 static inline int wg_queue_enqueue_per_device(
@@ -189,7 +262,7 @@ static inline int wg_queue_enqueue_per_device(
 	cpu = wg_cpumask_next_online(&device_queue->last_cpu);
 	if (unlikely(ptr_ring_produce_bh(per_cpu_ptr(device_queue->ring, cpu), skb)))
 		return -EPIPE;
-	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
+	wg_multicore_worker_kick(device_queue->worker, cpu, wq);
 	return 0;
 }
 
@@ -200,33 +273,58 @@ static inline int wg_queue_enqueue_per_device_and_peer(
 	int cpu;
 
 	atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
-	/* We first queue this up for the peer ingestion, but the consumer
-	 * will wait for the state to change to CRYPTED or DEAD before.
-	 */
 	if (unlikely(!wg_prev_queue_enqueue(peer_queue, skb)))
 		return -ENOSPC;
 
-	/* Then we queue it up in the device queue, which consumes the
-	 * packet as soon as it can.
-	 */
 	cpu = wg_cpumask_next_online(&device_queue->last_cpu);
 	if (unlikely(ptr_ring_produce_bh(per_cpu_ptr(device_queue->ring, cpu), skb)))
 		return -EPIPE;
-	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
+	wg_multicore_worker_kick(device_queue->worker, cpu, wq);
 	return 0;
 }
 
 static inline void wg_queue_enqueue_per_peer_tx(struct sk_buff *skb, enum packet_state state)
 {
-	/* We take a reference, because as soon as we call atomic_set, the
-	 * peer can be freed from below us.
-	 */
 	struct wg_peer *peer = wg_peer_get(PACKET_PEER(skb));
 
 	atomic_set_release(&PACKET_CB(skb)->state, state);
-	queue_work_on(wg_cpumask_choose_online(&peer->serial_work_cpu, peer->internal_id),
-		      peer->device->packet_crypt_wq, &peer->transmit_packet_work);
+	if (!test_and_set_bit(WG_WORK_KICKED, &peer->tx_kick))
+		queue_work_on(wg_cpumask_choose_online(&peer->serial_work_cpu,
+						       peer->internal_id),
+			      peer->device->packet_crypt_wq,
+			      &peer->transmit_packet_work);
 	wg_peer_put(peer);
+}
+
+static inline bool wg_peer_tx_ready(struct wg_peer *peer)
+{
+	struct sk_buff *skb = wg_prev_queue_peek(&peer->tx_queue);
+
+	return skb && atomic_read_acquire(&PACKET_CB(skb)->state) !=
+			      PACKET_STATE_UNCRYPTED;
+}
+
+static inline bool wg_peer_tx_poll(struct wg_peer *peer)
+{
+	unsigned int i, iters;
+
+	if (!READ_ONCE(peer->device->encrypt_queue.poll))
+		return false;
+	iters = READ_ONCE(wg_poll_iters);
+	for (i = 0; i < iters; ++i) {
+		if (wg_peer_tx_ready(peer))
+			return true;
+		if (need_resched())
+			return false;
+		cpu_relax();
+	}
+	return false;
+}
+
+static inline void wg_peer_tx_release(struct wg_peer *peer)
+{
+	clear_bit_unlock(WG_WORK_KICKED, &peer->tx_kick);
+	smp_mb__after_atomic();
 }
 
 static inline void wg_queue_enqueue_per_peer_rx(struct sk_buff *skb, enum packet_state state)

@@ -17,6 +17,7 @@ wg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
 
 	for_each_possible_cpu(cpu) {
 		per_cpu_ptr(worker, cpu)->ptr = ptr;
+		per_cpu_ptr(worker, cpu)->kick = 0;
 		INIT_WORK(&per_cpu_ptr(worker, cpu)->work, function);
 	}
 	return worker;
@@ -29,6 +30,7 @@ int wg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
 
 	memset(queue, 0, sizeof(*queue));
 	queue->last_cpu = -1;
+	queue->poll = true;
 	queue->ring = alloc_percpu(struct ptr_ring);
 	if (!queue->ring)
 		return -ENOMEM;

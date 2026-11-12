@@ -284,14 +284,36 @@ static void wg_receive_handshake_packet(struct wg_device *wg,
 
 void wg_packet_handshake_receive_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct multicore_worker, work)->ptr;
+	struct multicore_worker *worker = container_of(work,
+						      struct multicore_worker, work);
+	struct crypt_queue *queue = worker->ptr;
 	struct wg_device *wg = container_of(queue, struct wg_device, handshake_queue);
-	struct sk_buff *skb;
+	void *batch[WG_CRYPT_BATCH];
+	int i, count;
 
-	while ((skb = wg_crypt_queue_consume(queue)) != NULL) {
-		wg_receive_handshake_packet(wg, skb);
-		dev_kfree_skb(skb);
-		atomic_dec(&wg->handshake_queue_len);
+	while (true) {
+		count = wg_crypt_queue_drain_local(queue, batch, WG_CRYPT_BATCH);
+		if (!count) {
+			if (wg_crypt_queue_poll(queue))
+				continue;
+
+			wg_multicore_worker_release(worker);
+			count = wg_crypt_queue_steal_batch(queue, batch,
+							  WG_CRYPT_BATCH);
+			if (!count) {
+				if (wg_crypt_queue_empty(queue))
+					break;
+				wg_multicore_worker_retain(worker);
+				continue;
+			}
+			wg_multicore_worker_retain(worker);
+		}
+
+		for (i = 0; i < count; ++i) {
+			wg_receive_handshake_packet(wg, batch[i]);
+			dev_kfree_skb(batch[i]);
+			atomic_dec(&wg->handshake_queue_len);
+		}
 		cond_resched();
 	}
 }
@@ -587,15 +609,40 @@ next:
 
 void wg_packet_decrypt_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct multicore_worker,
-						 work)->ptr;
+	struct multicore_worker *worker = container_of(work,
+						      struct multicore_worker, work);
+	struct crypt_queue *queue = worker->ptr;
+	void *batch[WG_CRYPT_BATCH];
 	struct sk_buff *skb;
+	int i, count;
 
-	while ((skb = wg_crypt_queue_consume(queue)) != NULL) {
-		enum packet_state state =
-			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
+	while (true) {
+		count = wg_crypt_queue_drain_local(queue, batch, WG_CRYPT_BATCH);
+		if (!count) {
+			if (wg_crypt_queue_poll(queue))
+				continue;
+
+			wg_multicore_worker_release(worker);
+			count = wg_crypt_queue_steal_batch(queue, batch,
+							  WG_CRYPT_BATCH);
+			if (!count) {
+				if (wg_crypt_queue_empty(queue))
+					break;
+				wg_multicore_worker_retain(worker);
+				continue;
+			}
+			wg_multicore_worker_retain(worker);
+		}
+
+		for (i = 0; i < count; ++i) {
+			enum packet_state state;
+
+			skb = batch[i];
+			state = likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
 				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
-		wg_queue_enqueue_per_peer_rx(skb, state);
+			wg_queue_enqueue_per_peer_rx(skb, state);
+		}
+
 		if (need_resched())
 			cond_resched();
 	}
@@ -666,8 +713,8 @@ void wg_packet_receive(struct wg_device *wg, struct sk_buff *skb)
 		}
 		atomic_inc(&wg->handshake_queue_len);
 		/* Queues up a call to packet_process_queued_handshake_packets(skb): */
-		queue_work_on(cpu, wg->handshake_receive_wq,
-			      &per_cpu_ptr(wg->handshake_queue.worker, cpu)->work);
+		wg_multicore_worker_kick(wg->handshake_queue.worker, cpu,
+					 wg->handshake_receive_wq);
 		break;
 	}
 	case MESSAGE_DATA:

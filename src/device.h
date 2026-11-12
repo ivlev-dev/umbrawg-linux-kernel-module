@@ -26,12 +26,14 @@ struct wg_device;
 struct multicore_worker {
 	void *ptr;
 	struct work_struct work;
+	unsigned long kick;
 };
 
 struct crypt_queue {
 	struct ptr_ring __percpu *ring;
 	struct multicore_worker __percpu *worker;
 	int last_cpu;
+	bool poll;
 };
 
 struct prev_queue {

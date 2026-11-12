@@ -23,6 +23,10 @@ static unsigned int uwg_napi_weight __read_mostly = 128;
 module_param_named(napi_weight, uwg_napi_weight, uint, 0644);
 MODULE_PARM_DESC(napi_weight, "per-peer NAPI poll weight");
 
+unsigned int wg_poll_iters __read_mostly = 512;
+module_param_named(poll_iters, wg_poll_iters, uint, 0644);
+MODULE_PARM_DESC(poll_iters, "crypt worker adaptive spin iterations");
+
 struct wg_peer *wg_peer_create(struct wg_device *wg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN])
@@ -43,10 +47,10 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
 
 	peer->device = wg;
+	peer->serial_work_cpu = nr_cpumask_bits;
 	wg_noise_handshake_init(&peer->handshake, &wg->static_identity,
 				public_key, preshared_key, peer);
 	peer->internal_id = atomic64_inc_return(&peer_counter);
-	peer->serial_work_cpu = nr_cpumask_bits;
 	wg_cookie_init(&peer->latest_cookie);
 	wg_timers_init(peer);
 	wg_cookie_checker_precompute_peer_keys(peer);
@@ -54,8 +58,9 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	INIT_WORK(&peer->transmit_handshake_work, wg_packet_handshake_send_worker);
 	INIT_WORK(&peer->transmit_packet_work, wg_packet_tx_worker);
 	wg_prev_queue_init(&peer->tx_queue);
-	wg_prev_queue_init(&peer->rx_queue);
 	peer->tx_cpu = -1;
+	peer->tx_kick = 0;
+	wg_prev_queue_init(&peer->rx_queue);
 	seqlock_init(&peer->endpoint_lock);
 	kref_init(&peer->refcount);
 	atomic64_set(&peer->rx_bytes, 0);

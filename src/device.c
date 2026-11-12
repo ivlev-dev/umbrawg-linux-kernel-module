@@ -146,6 +146,14 @@ static int wg_stop(struct net_device *dev)
 	return 0;
 }
 
+static void wg_device_set_crypt_poll(struct wg_device *wg, bool enabled)
+{
+	if (READ_ONCE(wg->encrypt_queue.poll) == enabled)
+		return;
+	WRITE_ONCE(wg->encrypt_queue.poll, enabled);
+	WRITE_ONCE(wg->decrypt_queue.poll, enabled);
+}
+
 static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct wg_device *wg = netdev_priv(dev);
@@ -185,21 +193,14 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 	{
 		int cpu = smp_processor_id();
 		unsigned long now = jiffies;
-		int prev = READ_ONCE(peer->tx_cpu);
 
-		if (READ_ONCE(peer->tx_parallel) &&
-		    time_after(now, READ_ONCE(peer->tx_last_jiffies) + HZ)) {
-			WRITE_ONCE(peer->tx_parallel, false);
-			prev = -1;
-		}
-
-		if (prev < 0)
-			WRITE_ONCE(peer->tx_cpu, cpu);
-		else if (prev != cpu) {
-			WRITE_ONCE(peer->tx_parallel, true);
+		if (READ_ONCE(peer->tx_cpu) != cpu) {
+			WRITE_ONCE(peer->tx_flip_jiffies, now);
 			WRITE_ONCE(peer->tx_cpu, cpu);
 		}
-		WRITE_ONCE(peer->tx_last_jiffies, now);
+		WRITE_ONCE(peer->tx_parallel,
+			   !time_after(now, READ_ONCE(peer->tx_flip_jiffies) + HZ));
+		wg_device_set_crypt_poll(wg, !READ_ONCE(peer->tx_parallel));
 	}
 
 	mtu = skb_valid_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;
