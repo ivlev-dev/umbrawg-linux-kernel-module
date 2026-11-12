@@ -46,6 +46,8 @@ static int __init wg_mod_init(void)
 	if (ret < 0)
 		goto err_netlink;
 
+	uwg_cc_debugfs_init();
+
 	pr_info(UWG_NAME " " WIREGUARD_VERSION " loaded. See github.com/ivlev-dev/umbrawg-linux-kernel-module for information.\n");
 	pr_info("Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.\n");
 	pr_info("Copyright (C) 2024-2025 AmneziaVPN <admin@amnezia.org>. All Rights Reserved.\n");
@@ -64,6 +66,7 @@ err_allowedips:
 
 static void __exit wg_mod_exit(void)
 {
+	uwg_cc_debugfs_uninit();
 	wg_genetlink_uninit();
 	wg_device_uninit();
 	wg_peer_uninit();

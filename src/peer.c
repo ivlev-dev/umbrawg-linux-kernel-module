@@ -55,6 +55,7 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 
 	peer->device = wg;
 	peer->serial_work_cpu = nr_cpumask_bits;
+	uwg_cc_init(&peer->cc);
 	wg_noise_handshake_init(&peer->handshake, &wg->static_identity,
 				public_key, preshared_key, peer);
 	peer->internal_id = atomic64_inc_return(&peer_counter);
@@ -251,6 +252,7 @@ static void kref_release(struct kref *refcount)
 	 * transmitted.
 	 */
 	wg_packet_purge_staged_packets(peer);
+	uwg_cc_clear(peer);
 
 	/* Free the memory used. */
 	call_rcu(&peer->rcu, rcu_release);

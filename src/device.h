@@ -67,6 +67,8 @@ struct wg_device {
 	u16 incoming_port;
 	u16 jc, jmin, jmax;
 	bool random_trailers, disable_cookies;
+	struct dentry *cc_dentry;
+	unsigned int cc_index;
 };
 
 int wg_device_init(void);

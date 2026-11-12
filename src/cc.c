@@ -1,0 +1,498 @@
+// SPDX-License-Identifier: GPL-2.0
+#include "cc.h"
+#include "device.h"
+#include "peer.h"
+#include "queueing.h"
+#include "socket.h"
+
+#include <linux/debugfs.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/netdevice.h>
+#include <linux/seq_file.h>
+#include <net/ip.h>
+#include <linux/math64.h>
+#include <linux/moduleparam.h>
+#include <linux/slab.h>
+#include <linux/unaligned.h>
+
+DEFINE_STATIC_KEY_FALSE(uwg_cc_active);
+
+static unsigned int uwg_cc_burst_ms __read_mostly = 10;
+module_param_named(cc_burst_ms, uwg_cc_burst_ms, uint, 0644);
+MODULE_PARM_DESC(cc_burst_ms, "token bucket burst window in milliseconds");
+
+static const char *const uwg_cc_names[] = {
+	[UWG_CC_NONE] = "none",
+	[UWG_CC_BRUTAL] = "brutal",
+	[UWG_CC_BBR] = "bbr",
+};
+
+const char *uwg_cc_mode_name(enum uwg_cc_mode mode)
+{
+	if (mode > UWG_CC_BBR)
+		return "unknown";
+	return uwg_cc_names[mode];
+}
+
+u32 uwg_cc_flow_hash(const struct sk_buff *skb)
+{
+	u32 a = 0, b = 0, c = 0, ports = 0;
+	u8 buf[sizeof(ports)];
+
+	if (skb->protocol == htons(ETH_P_IP)) {
+		const struct iphdr *ip = ip_hdr(skb);
+
+		a = (__force u32)ip->saddr;
+		b = (__force u32)ip->daddr;
+		c = ip->protocol;
+		if (!(ip->frag_off & htons(IP_OFFSET)) &&
+		    (ip->protocol == IPPROTO_TCP || ip->protocol == IPPROTO_UDP)) {
+			const void *p = skb_header_pointer(skb, ip->ihl * 4,
+							   sizeof(buf), buf);
+
+			if (p)
+				memcpy(&ports, p, sizeof(ports));
+		}
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		const struct ipv6hdr *ip6 = ipv6_hdr(skb);
+
+		a = (__force u32)ip6->saddr.s6_addr32[0] ^
+		    (__force u32)ip6->saddr.s6_addr32[1] ^
+		    (__force u32)ip6->saddr.s6_addr32[2] ^
+		    (__force u32)ip6->saddr.s6_addr32[3];
+		b = (__force u32)ip6->daddr.s6_addr32[0] ^
+		    (__force u32)ip6->daddr.s6_addr32[1] ^
+		    (__force u32)ip6->daddr.s6_addr32[2] ^
+		    (__force u32)ip6->daddr.s6_addr32[3];
+		c = ip6->nexthdr;
+		if (ip6->nexthdr == IPPROTO_TCP || ip6->nexthdr == IPPROTO_UDP) {
+			const void *p = skb_header_pointer(skb,
+							   sizeof(*ip6),
+							   sizeof(buf), buf);
+
+			if (p)
+				memcpy(&ports, p, sizeof(ports));
+		}
+	}
+
+	return jhash_2words(a ^ ports, b ^ c, 0x9e3779b9);
+}
+
+static u64 uwg_cc_cap_bytes(const struct wg_peer *peer)
+{
+	u64 rate = READ_ONCE(peer->cc.rate_bps);
+	u64 cap;
+
+	if (!rate)
+		return UWG_CC_MIN_CAP_BYTES;
+
+	cap = mul_u64_u64_div_u64(rate, (u64)uwg_cc_burst_ms * NSEC_PER_MSEC,
+				  8 * NSEC_PER_SEC);
+	return max_t(u64, cap, UWG_CC_MIN_CAP_BYTES);
+}
+
+static void uwg_cc_refill(struct wg_peer *peer, ktime_t now)
+{
+	struct uwg_cc *cc = &peer->cc;
+	u64 rate = READ_ONCE(cc->rate_bps);
+	u64 dt;
+
+	if (!rate) {
+		cc->tokens = 0;
+		cc->last = now;
+		return;
+	}
+
+	dt = ktime_to_ns(ktime_sub(now, cc->last));
+	cc->last = now;
+	if (dt)
+		cc->tokens = min_t(u64, cc->tokens +
+					   mul_u64_u64_div_u64(rate, dt,
+							       8 * NSEC_PER_SEC),
+				   uwg_cc_cap_bytes(peer));
+}
+
+static unsigned int uwg_cc_bucket_index(const struct sk_buff *skb)
+{
+	return PACKET_CB(skb)->flow_hash & (UWG_CC_BUCKETS - 1);
+}
+
+static struct sk_buff *uwg_cc_peek_locked(struct uwg_cc *cc)
+{
+	unsigned int i, idx;
+
+	for (i = 0; i < UWG_CC_BUCKETS; ++i) {
+		idx = (cc->cursor + i) & (UWG_CC_BUCKETS - 1);
+		if (cc->busy & BIT(idx))
+			return skb_peek(&cc->buckets[idx].queue);
+	}
+	return NULL;
+}
+
+static struct sk_buff *uwg_cc_pop_locked(struct uwg_cc *cc)
+{
+	unsigned int i, idx;
+	struct sk_buff *skb;
+
+	for (i = 0; i < UWG_CC_BUCKETS; ++i) {
+		idx = (cc->cursor + i) & (UWG_CC_BUCKETS - 1);
+		if (!(cc->busy & BIT(idx)))
+			continue;
+		skb = __skb_dequeue(&cc->buckets[idx].queue);
+		if (skb_queue_empty(&cc->buckets[idx].queue))
+			cc->busy &= ~BIT(idx);
+		cc->cursor = (idx + 1) & (UWG_CC_BUCKETS - 1);
+		cc->qlen--;
+		return skb;
+	}
+	return NULL;
+}
+
+static void uwg_cc_arm_locked(struct wg_peer *peer, u64 need_bytes)
+{
+	struct uwg_cc *cc = &peer->cc;
+	u64 rate = READ_ONCE(cc->rate_bps);
+	u64 delay_ns;
+
+	if (!rate || cc->armed)
+		return;
+
+	delay_ns = mul_u64_u64_div_u64(max_t(u64, need_bytes, 1),
+				       8 * NSEC_PER_SEC, rate);
+	delay_ns = clamp_t(u64, delay_ns, 1,
+			   (u64)uwg_cc_burst_ms * 2 * NSEC_PER_MSEC);
+	cc->armed = true;
+	hrtimer_start(&cc->timer, ns_to_ktime(delay_ns),
+		      HRTIMER_MODE_REL_SOFT);
+}
+
+static enum hrtimer_restart uwg_cc_timer(struct hrtimer *timer)
+{
+	struct uwg_cc *cc = container_of(timer, struct uwg_cc, timer);
+	struct wg_peer *peer = container_of(cc, struct wg_peer, cc);
+	struct sk_buff_head tx;
+	struct sk_buff *skb;
+	unsigned int i;
+
+	rcu_read_lock();
+	if (!wg_peer_get_maybe_zero(peer)) {
+		rcu_read_unlock();
+		return HRTIMER_NORESTART;
+	}
+	rcu_read_unlock();
+
+	__skb_queue_head_init(&tx);
+
+	spin_lock(&cc->lock);
+	cc->armed = false;
+	uwg_cc_refill(peer, ktime_get());
+	for (i = 0; i < UWG_CC_TIMER_BUDGET; ++i) {
+		skb = uwg_cc_peek_locked(cc);
+		if (!skb || cc->tokens < skb->len)
+			break;
+		skb = uwg_cc_pop_locked(cc);
+		cc->tokens -= skb->len;
+		__skb_queue_tail(&tx, skb);
+	}
+
+	if (cc->busy) {
+		skb = uwg_cc_peek_locked(cc);
+		if (skb)
+			uwg_cc_arm_locked(peer, skb->len > cc->tokens ?
+							skb->len - cc->tokens : 1);
+	}
+	spin_unlock(&cc->lock);
+
+	while ((skb = __skb_dequeue(&tx)) != NULL)
+		wg_socket_send_skb_to_peer(peer, skb, PACKET_CB(skb)->ds);
+
+	wg_peer_put(peer);
+	return HRTIMER_NORESTART;
+}
+
+void uwg_cc_init(struct uwg_cc *cc)
+{
+	memset(cc, 0, sizeof(*cc));
+	spin_lock_init(&cc->lock);
+	hrtimer_setup(&cc->timer, uwg_cc_timer, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_SOFT);
+	cc->last = ktime_get();
+}
+
+static void uwg_cc_purge_locked(struct wg_peer *peer)
+{
+	struct uwg_cc *cc = &peer->cc;
+	struct sk_buff *skb;
+
+	while ((skb = uwg_cc_pop_locked(cc)) != NULL)
+		kfree_skb(skb);
+}
+
+void uwg_cc_purge(struct wg_peer *peer)
+{
+	struct uwg_cc *cc = &peer->cc;
+
+	hrtimer_cancel(&cc->timer);
+	spin_lock_bh(&cc->lock);
+	cc->armed = false;
+	uwg_cc_purge_locked(peer);
+	spin_unlock_bh(&cc->lock);
+}
+
+int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
+{
+	struct uwg_cc *cc = &peer->cc;
+	struct uwg_cc_bucket *buckets = NULL;
+	enum uwg_cc_mode old = READ_ONCE(cc->mode);
+
+	if (mode > UWG_CC_BBR)
+		return -EINVAL;
+	if (mode == UWG_CC_BBR)
+		return -EOPNOTSUPP;
+	if (mode != UWG_CC_NONE && !rate_bps)
+		return -EINVAL;
+
+	if (mode != UWG_CC_NONE) {
+		buckets = kcalloc(UWG_CC_BUCKETS, sizeof(*buckets), GFP_KERNEL);
+		if (!buckets)
+			return -ENOMEM;
+		for (int i = 0; i < UWG_CC_BUCKETS; ++i)
+			__skb_queue_head_init(&buckets[i].queue);
+	}
+
+	hrtimer_cancel(&cc->timer);
+	spin_lock_bh(&cc->lock);
+	cc->armed = false;
+	uwg_cc_purge_locked(peer);
+	kfree(cc->buckets);
+	cc->buckets = buckets;
+	cc->busy = 0;
+	cc->qlen = 0;
+	cc->cursor = 0;
+	cc->tokens = 0;
+	cc->last = ktime_get();
+	WRITE_ONCE(cc->rate_bps, mode == UWG_CC_NONE ? 0 : rate_bps);
+	WRITE_ONCE(cc->mode, mode);
+	spin_unlock_bh(&cc->lock);
+
+	if (old == UWG_CC_NONE && mode != UWG_CC_NONE)
+		static_branch_inc(&uwg_cc_active);
+	else if (old != UWG_CC_NONE && mode == UWG_CC_NONE)
+		static_branch_dec(&uwg_cc_active);
+
+	return 0;
+}
+
+void uwg_cc_clear(struct wg_peer *peer)
+{
+	struct uwg_cc *cc = &peer->cc;
+	bool was_active = READ_ONCE(cc->mode) != UWG_CC_NONE;
+
+	hrtimer_try_to_cancel(&cc->timer);
+	spin_lock_bh(&cc->lock);
+	cc->armed = false;
+	WRITE_ONCE(cc->mode, UWG_CC_NONE);
+	WRITE_ONCE(cc->rate_bps, 0);
+	uwg_cc_purge_locked(peer);
+	kfree(cc->buckets);
+	cc->buckets = NULL;
+	spin_unlock_bh(&cc->lock);
+
+	if (was_active)
+		static_branch_dec(&uwg_cc_active);
+}
+
+bool uwg_cc_tx(struct wg_peer *peer, struct sk_buff *skb)
+{
+	struct uwg_cc *cc = &peer->cc;
+	bool send_now = false;
+	unsigned int idx;
+
+	spin_lock_bh(&cc->lock);
+	uwg_cc_refill(peer, ktime_get());
+
+	if (!cc->qlen && cc->tokens >= skb->len) {
+		cc->tokens -= skb->len;
+		send_now = true;
+	} else if (cc->qlen >= UWG_CC_MAX_QUEUED) {
+		spin_unlock_bh(&cc->lock);
+		DEV_STATS_INC(peer->device->dev, tx_dropped);
+		kfree_skb(skb);
+		return true;
+	} else {
+		idx = uwg_cc_bucket_index(skb);
+		__skb_queue_tail(&cc->buckets[idx].queue, skb);
+		cc->busy |= BIT(idx);
+		cc->qlen++;
+		uwg_cc_arm_locked(peer, skb->len > cc->tokens ?
+						skb->len - cc->tokens : 1);
+	}
+	spin_unlock_bh(&cc->lock);
+
+	if (send_now)
+		wg_socket_send_skb_to_peer(peer, skb, PACKET_CB(skb)->ds);
+
+	return true;
+}
+
+static struct dentry *uwg_cc_debugfs_root;
+static DEFINE_MUTEX(uwg_cc_dfs_lock);
+static bool uwg_cc_dfs_up;
+static atomic_t uwg_cc_dev_index = ATOMIC_INIT(0);
+
+unsigned int uwg_cc_next_index(void)
+{
+	return (unsigned int)atomic_inc_return(&uwg_cc_dev_index);
+}
+
+static int uwg_cc_apply(struct wg_device *wg, u64 id, bool all,
+			enum uwg_cc_mode mode, u64 bps)
+{
+	struct wg_peer *peer;
+	int ret = 0;
+
+	mutex_lock(&wg->device_update_lock);
+	list_for_each_entry(peer, &wg->peer_list, peer_list) {
+		if (!all && peer->internal_id != id)
+			continue;
+		ret = uwg_cc_set(peer, mode, bps);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&wg->device_update_lock);
+	return ret;
+}
+
+static ssize_t uwg_cc_debugfs_write(struct file *file,
+				    const char __user *user_buf,
+				    size_t count, loff_t *ppos)
+{
+	struct wg_device *wg = netdev_priv(file_inode(file)->i_private);
+	char buf[64], mode_s[16] = {};
+	u64 id = 0, mbps = 0;
+	enum uwg_cc_mode mode;
+	bool all;
+	int n;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+	buf[count] = 0;
+
+	all = !strncmp(buf, "all", 3);
+	if (all)
+		n = sscanf(buf, "%*s %15s %llu", mode_s, &mbps);
+	else
+		n = sscanf(buf, "%llu %15s %llu", &id, mode_s, &mbps);
+	if (n < 1)
+		return -EINVAL;
+
+	if (!strcmp(mode_s, "none"))
+		mode = UWG_CC_NONE;
+	else if (!strcmp(mode_s, "brutal"))
+		mode = UWG_CC_BRUTAL;
+	else if (!strcmp(mode_s, "bbr"))
+		mode = UWG_CC_BBR;
+	else
+		return -EINVAL;
+
+	n = uwg_cc_apply(wg, id, all, mode, mbps * 1000ULL * 1000ULL);
+	if (n < 0)
+		return n;
+	return count;
+}
+
+static int uwg_cc_show(struct seq_file *seq, void *offset)
+{
+	struct net_device *dev = seq->private;
+	struct wg_device *wg = netdev_priv(dev);
+	struct wg_peer *peer;
+
+	seq_printf(seq, "netdev %s\n", dev->name);
+	seq_printf(seq, "netns %u\n", dev_net(dev)->ns.inum);
+
+	mutex_lock(&wg->device_update_lock);
+	list_for_each_entry(peer, &wg->peer_list, peer_list)
+		seq_printf(seq, "peer %llu %s %llu\n", peer->internal_id,
+			   uwg_cc_mode_name(READ_ONCE(peer->cc.mode)),
+			   div_u64(READ_ONCE(peer->cc.rate_bps), 1000ULL * 1000ULL));
+	mutex_unlock(&wg->device_update_lock);
+	return 0;
+}
+
+static int uwg_cc_debugfs_open(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	dev_hold(inode->i_private);
+	ret = single_open(file, uwg_cc_show, inode->i_private);
+	if (ret)
+		dev_put(inode->i_private);
+	return ret;
+}
+
+static int uwg_cc_debugfs_release(struct inode *inode, struct file *file)
+{
+	dev_put(inode->i_private);
+	return single_release(inode, file);
+}
+
+static const struct file_operations uwg_cc_debugfs_fops = {
+	.open		= uwg_cc_debugfs_open,
+	.read		= seq_read,
+	.write		= uwg_cc_debugfs_write,
+	.llseek		= seq_lseek,
+	.release	= uwg_cc_debugfs_release,
+};
+
+int uwg_cc_debugfs_init(void)
+{
+	uwg_cc_debugfs_root = debugfs_create_dir("umbrawg", NULL);
+	if (IS_ERR(uwg_cc_debugfs_root)) {
+		uwg_cc_debugfs_root = NULL;
+		return 0;
+	}
+	if (uwg_cc_debugfs_root)
+		uwg_cc_dfs_up = true;
+	return 0;
+}
+
+void uwg_cc_debugfs_uninit(void)
+{
+	mutex_lock(&uwg_cc_dfs_lock);
+	uwg_cc_dfs_up = false;
+	debugfs_remove_recursive(uwg_cc_debugfs_root);
+	uwg_cc_debugfs_root = NULL;
+	mutex_unlock(&uwg_cc_dfs_lock);
+}
+
+void uwg_cc_debugfs_add_device(struct wg_device *wg)
+{
+	char name[32];
+
+	mutex_lock(&uwg_cc_dfs_lock);
+	if (uwg_cc_dfs_up) {
+		snprintf(name, sizeof(name), "dev%u", wg->cc_index);
+		wg->cc_dentry = debugfs_create_file(name, 0600,
+						    uwg_cc_debugfs_root,
+						    wg->dev,
+						    &uwg_cc_debugfs_fops);
+		if (IS_ERR(wg->cc_dentry))
+			wg->cc_dentry = NULL;
+	}
+	mutex_unlock(&uwg_cc_dfs_lock);
+}
+
+void uwg_cc_debugfs_remove_device(struct wg_device *wg)
+{
+	struct dentry *dentry;
+
+	mutex_lock(&uwg_cc_dfs_lock);
+	dentry = wg->cc_dentry;
+	wg->cc_dentry = NULL;
+	if (uwg_cc_dfs_up && dentry)
+		debugfs_remove(dentry);
+	mutex_unlock(&uwg_cc_dfs_lock);
+}

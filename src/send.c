@@ -338,6 +338,13 @@ static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *fir
 	skb_list_walk_safe(first, skb, next) {
 		bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 
+		if (static_branch_unlikely(&uwg_cc_active) &&
+		    unlikely(READ_ONCE(peer->cc.mode) != UWG_CC_NONE)) {
+			uwg_cc_tx(peer, skb);
+			if (!is_keepalive)
+				data_sent = true;
+			continue;
+		}
 		if (likely(!wg_socket_send_skb_to_peer(peer, skb,
 				PACKET_CB(skb)->ds) && !is_keepalive))
 			data_sent = true;
@@ -528,6 +535,8 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 		 * might consider using flowi->tos as outer instead.
 		 */
 		PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
+		if (static_branch_unlikely(&uwg_cc_active))
+			PACKET_CB(skb)->flow_hash = uwg_cc_flow_hash(skb);
 		PACKET_CB(skb)->nonce =
 				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))

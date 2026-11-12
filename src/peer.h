@@ -9,6 +9,7 @@
 #include "device.h"
 #include "messages.h"
 #include "noise.h"
+#include "cc.h"
 #include "cookie.h"
 #include "type.h"
 
@@ -64,6 +65,7 @@ struct wg_peer {
 	struct cookie latest_cookie;
 	struct hlist_node pubkey_hash;
 	struct uwg_peer_stats __percpu *stats;
+	struct uwg_cc cc;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
 	struct timer_list timer_persistent_keepalive;

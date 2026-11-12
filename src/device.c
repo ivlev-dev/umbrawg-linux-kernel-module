@@ -124,6 +124,7 @@ static int wg_stop(struct net_device *dev)
 	mutex_lock(&wg->device_update_lock);
 	list_for_each_entry(peer, &wg->peer_list, peer_list) {
 		wg_packet_purge_staged_packets(peer);
+		uwg_cc_purge(peer);
 		wg_timers_stop(peer);
 		wg_noise_handshake_clear(&peer->handshake);
 		wg_noise_keypairs_clear(&peer->keypairs);
@@ -304,6 +305,7 @@ static void wg_destruct(struct net_device *dev)
 	kvfree(wg->peer_hashtable);
 	mutex_unlock(&wg->device_update_lock);
 
+	uwg_cc_debugfs_remove_device(wg);
 	pr_debug("%s: Interface destroyed\n", dev->name);
 	free_netdev(dev);
 }
@@ -345,6 +347,7 @@ static void wg_setup(struct net_device *dev)
 
 	memset(wg, 0, sizeof(*wg));
 	wg->dev = dev;
+	wg->cc_index = uwg_cc_next_index();
 
 	u32_range_init(&wg->init_header, MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_INITIATION);
 	u32_range_init(&wg->resp_header, MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_HANDSHAKE_RESPONSE);
@@ -425,6 +428,7 @@ static int wg_newlink(struct net_device *dev,
 	 * register_netdevice doesn't call it for us if it fails.
 	 */
 	dev->priv_destructor = wg_destruct;
+	uwg_cc_debugfs_add_device(wg);
 
 	pr_debug("%s: Interface created\n", dev->name);
 	return ret;

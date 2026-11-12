@@ -67,6 +67,7 @@ struct packet_cb {
 	u32 type;
 	u32 padding;
 	u8 ds;
+	u32 flow_hash;
 	bool is_keepalive;
 	bool parallel;
 };

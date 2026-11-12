@@ -11,7 +11,7 @@ ccflags-$(CONFIG_UMBRAWG_DEBUG) += -DDEBUG -g
 ccflags-$(if $(WIREGUARD_VERSION),y,) += -D'WIREGUARD_VERSION="$(WIREGUARD_VERSION)"'
 ccflags-$(if $(OMIT_ENDPOINTS),y,) += -D'OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"'
 
-uwg-y := main.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o
+uwg-y := main.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o cc.o
 
 obj-$(if $(KBUILD_EXTMOD),m,$(CONFIG_UMBRAWG)) := $(UWG_NAME).o
 $(UWG_NAME)-y := $(uwg-y)

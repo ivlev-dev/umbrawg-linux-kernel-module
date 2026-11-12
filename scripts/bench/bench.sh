@@ -25,6 +25,7 @@ UWG_DEV_OPTS=${UWG_DEV_OPTS:-}
 UWG_HP_KEY=${UWG_HP_KEY:-}
 UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
+UWG_CC=${UWG_CC:-}
 UWG_UDP_BITRATE=${UWG_UDP_BITRATE:-0}
 
 if [ "$MODE" = umbrawg ]; then
@@ -135,6 +136,26 @@ ip -n "$N2" addr add 192.168.199.2/32 dev uw0
 ip -n "$N1" route add 192.168.199.2/32 dev uw0
 ip -n "$N2" route add 192.168.199.1/32 dev uw0
 
+cc_file() {
+	ns=${1:?}
+	inum=$(ip netns exec "$ns" readlink /proc/self/ns/net | tr -dc '0-9')
+	for f in /sys/kernel/debug/umbrawg/dev*; do
+		[ -e "$f" ] || continue
+		if [ "$(awk '/^netns /{print $2}' "$f" 2>/dev/null)" = "$inum" ]; then
+			printf '%s' "$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
+if [ -n "$UWG_CC" ]; then
+	for ns in "$N1" "$N2"; do
+		f=$(cc_file "$ns" || true)
+		[ -n "$f" ] && printf '%s\n' "$UWG_CC" >"$f"
+	done
+fi
+
 i=0
 while [ "$i" -lt 10 ]; do
 	ip netns exec "$N1" ping -c1 -W1 192.168.199.2 >/dev/null 2>&1 && break
@@ -211,6 +232,8 @@ done
 
 if [ -n "${UWG_STATS:-}" ]; then
 	ip netns exec "$N1" "$TOOL" show uw0 | sed -n '/peer/,/^$/p' | head -12
+	f=$(cc_file "$N1" || true)
+	[ -n "$f" ] && cat "$f"
 fi
 
 awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '
