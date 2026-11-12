@@ -43,6 +43,17 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	u16 padding;
 	bool random_trailers = wg->random_trailers;
 
+	padding = wg->transport_padding;
+	expected_len = padding + MESSAGE_MINIMUM_LENGTH;
+	if (skb->len >= expected_len &&
+		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
+		u32_range_contains(wg->transport_header,
+			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
+		*res_padding = padding;
+		*res_type = MESSAGE_DATA;
+		return sizeof(struct message_data);
+	}
+
 	padding = wg->init_padding;
 	expected_len = padding + sizeof(struct message_handshake_initiation);
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
@@ -69,22 +80,11 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	expected_len = padding + sizeof(struct message_handshake_cookie);
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
-		u32_range_contains(wg->cookie_header, 
+		u32_range_contains(wg->cookie_header,
 			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_COOKIE;
 		return sizeof(struct message_handshake_cookie);
-	}
-
-	padding = wg->transport_padding;
-	expected_len = padding + MESSAGE_MINIMUM_LENGTH;
-	if (skb->len >= expected_len &&
-		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
-		u32_range_contains(wg->transport_header,
-			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
-		*res_padding = padding;
-		*res_type = MESSAGE_DATA;
-		return sizeof(struct message_data);
 	}
 
 	net_dbg_skb_ratelimited("%s: Unknown message from %pISpfsc encountered, packet dropped\n",
@@ -100,6 +100,7 @@ static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 	size_t data_offset, data_len, header_len;
 	struct udphdr *udp;
 	u8 buf[HEADER_PROTECTION_NONCE_SIZE], *ptr, hash[4] = {0};
+	u8 stream[sizeof(struct message_data)];
 	u32 type;
 	u16 padding;
 	bool protected = false;
@@ -142,8 +143,9 @@ static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 
 		protected = uwg_header_protection_init(&state, wg, ptr);
 		if (protected) {
-			chacha20_crypt(&state, hash, hash, sizeof(hash));
-			state.x[12] = 0; // rewind counter to 0
+			memset(stream, 0, sizeof(stream));
+			chacha20_crypt(&state, stream, stream, sizeof(stream));
+			memcpy(hash, stream, sizeof(hash));
 		}
 	}
 
@@ -162,8 +164,18 @@ static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 		return -EINVAL;
 	__skb_pull(skb, data_offset + padding);
 
-	if (protected)
-		chacha20_crypt(&state, skb->data, skb->data, header_len);
+	if (protected) {
+		if (likely(header_len == sizeof(struct message_data))) {
+			u8 *dst = skb->data;
+			int i;
+
+			for (i = 0; i < sizeof(struct message_data); ++i)
+				dst[i] ^= stream[i];
+		} else {
+			state.x[12] = 0;
+			chacha20_crypt(&state, skb->data, skb->data, header_len);
+		}
+	}
 
 	return 0;
 }
