@@ -11,7 +11,9 @@
 #include "ratelimiter.h"
 #include "peer.h"
 #include "messages.h"
+#include "awg_identity.h"
 
+#include <linux/smp.h>
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
 #include <linux/inet.h>
@@ -32,9 +34,7 @@ static LIST_HEAD(device_list);
 static int wg_open(struct net_device *dev)
 {
 	struct in_device *dev_v4 = __in_dev_get_rtnl(dev);
-#ifndef COMPAT_CANNOT_USE_IN6_DEV_GET
 	struct inet6_dev *dev_v6 = __in6_dev_get(dev);
-#endif
 	struct wg_device *wg = netdev_priv(dev);
 	struct wg_peer *peer;
 	int ret;
@@ -47,14 +47,8 @@ static int wg_open(struct net_device *dev)
 		IN_DEV_CONF_SET(dev_v4, SEND_REDIRECTS, false);
 		IPV4_DEVCONF_ALL(dev_net(dev), SEND_REDIRECTS) = false;
 	}
-#ifndef COMPAT_CANNOT_USE_IN6_DEV_GET
 	if (dev_v6)
-#ifndef COMPAT_CANNOT_USE_DEV_CNF
 		dev_v6->cnf.addr_gen_mode = IN6_ADDR_GEN_MODE_NONE;
-#else
-		dev_v6->addr_gen_mode = IN6_ADDR_GEN_MODE_NONE;
-#endif
-#endif
 
 	mutex_lock(&wg->device_update_lock);
 	ret = wg_socket_init(wg, wg->incoming_port);
@@ -179,6 +173,18 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto err_peer;
 	}
 
+	{
+		int cpu = smp_processor_id();
+		int prev = READ_ONCE(peer->tx_cpu);
+
+		if (prev < 0)
+			WRITE_ONCE(peer->tx_cpu, cpu);
+		else if (prev != cpu) {
+			WRITE_ONCE(peer->tx_parallel, true);
+			WRITE_ONCE(peer->tx_cpu, cpu);
+		}
+	}
+
 	mtu = skb_valid_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;
 
 	__skb_queue_head_init(&packets);
@@ -247,9 +253,6 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_open		= wg_open,
 	.ndo_stop		= wg_stop,
 	.ndo_start_xmit		= wg_xmit,
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	.ndo_get_stats64 = dev_get_tstats64
-#endif
 };
 
 static void wg_destruct(struct net_device *dev)
@@ -278,9 +281,7 @@ static void wg_destruct(struct net_device *dev)
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
 	wg_ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(wg->static_identity));
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	free_percpu(dev->tstats);
-#endif
+	awg_header_protection_clear(&wg->header_protection);
 	kvfree(wg->index_hashtable);
 	kvfree(wg->peer_hashtable);
 	mutex_unlock(&wg->device_update_lock);
@@ -289,7 +290,7 @@ static void wg_destruct(struct net_device *dev)
 	free_netdev(dev);
 }
 
-static const struct device_type device_type = { .name = KBUILD_MODNAME };
+static const struct device_type device_type = { .name = AWG_NAME };
 
 static void wg_setup(struct net_device *dev)
 {
@@ -308,26 +309,14 @@ static void wg_setup(struct net_device *dev)
 	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_MULTIPLE);
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
-#ifndef COMPAT_CANNOT_USE_IFF_NO_QUEUE
 	dev->priv_flags |= IFF_NO_QUEUE;
-#else
-	dev->tx_queue_len = 0;
-#endif
-#ifdef COMPAT_NETDEV_HAS_LLTX_PARAM
 	dev->lltx = true;
-#else
-	dev->features |= NETIF_F_LLTX;
-#endif
 	dev->features |= WG_NETDEV_FEATURES;
 	dev->hw_features |= WG_NETDEV_FEATURES;
 	dev->hw_enc_features |= WG_NETDEV_FEATURES;
 	dev->mtu = ETH_DATA_LEN - overhead;
-#ifndef COMPAT_CANNOT_USE_MAX_MTU
 	dev->max_mtu = round_down(INT_MAX, MESSAGE_PADDING_MULTIPLE) - overhead;
-#endif
-#ifndef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
-#endif
 
 	SET_NETDEV_DEVTYPE(dev, &device_type);
 
@@ -355,7 +344,7 @@ static int wg_newlink(struct net_device *dev,
 
 	rcu_assign_pointer(wg->creating_net, link_net);
 	init_rwsem(&wg->static_identity.lock);
-	init_rwsem(&wg->header_protection.lock);
+	mutex_init(&wg->header_protection.update_lock);
 	mutex_init(&wg->socket_update_lock);
 	mutex_init(&wg->device_update_lock);
 	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
@@ -373,23 +362,17 @@ static int wg_newlink(struct net_device *dev,
 	if (!wg->index_hashtable)
 		goto err_free_peer_hashtable;
 
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		goto err_free_index_hashtable;
-#endif
-
-	wg->handshake_receive_wq = alloc_workqueue("wg-kex-%s",
+	wg->handshake_receive_wq = alloc_workqueue(AWG_NAME "-kex-%s",
 			WQ_CPU_INTENSIVE | WQ_FREEZABLE | WQ_PERCPU, 0, dev->name);
 	if (!wg->handshake_receive_wq)
-		goto err_free_tstats;
+		goto err_free_index_hashtable;
 
-	wg->handshake_send_wq = alloc_workqueue("wg-kex-%s",
+	wg->handshake_send_wq = alloc_workqueue(AWG_NAME "-kex-%s",
 			WQ_UNBOUND | WQ_FREEZABLE, 0, dev->name);
 	if (!wg->handshake_send_wq)
 		goto err_destroy_handshake_receive;
 
-	wg->packet_crypt_wq = alloc_workqueue("wg-crypt-%s",
+	wg->packet_crypt_wq = alloc_workqueue(AWG_NAME "-crypt-%s",
 			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU, 0, dev->name);
 	if (!wg->packet_crypt_wq)
 		goto err_destroy_handshake_send;
@@ -442,42 +425,18 @@ err_destroy_handshake_send:
 	destroy_workqueue(wg->handshake_send_wq);
 err_destroy_handshake_receive:
 	destroy_workqueue(wg->handshake_receive_wq);
-err_free_tstats:
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	free_percpu(dev->tstats);
 err_free_index_hashtable:
-#endif
 	kvfree(wg->index_hashtable);
 err_free_peer_hashtable:
 	kvfree(wg->peer_hashtable);
 	return ret;
 }
 
-#ifdef COMPAT_CANNOT_USE_RTNL_NEWLINK_PARAMS
-static int wg_newlink_old(struct net *src_net, struct net_device *dev,
-		      struct nlattr *tb[], struct nlattr *data[],
-		      struct netlink_ext_ack *extack)
-{
-	struct rtnl_newlink_params params = {
-		.src_net = src_net,
-		.link_net = NULL,
-		.peer_net = NULL,
-		.tb = tb,
-		.data = data,
-	};
-	return wg_newlink(dev, &params, NULL);
-}
-#endif
-
 static struct rtnl_link_ops link_ops __read_mostly = {
-	.kind			= KBUILD_MODNAME,
+	.kind			= AWG_NAME,
 	.priv_size		= sizeof(struct wg_device),
 	.setup			= wg_setup,
-#ifndef COMPAT_CANNOT_USE_RTNL_NEWLINK_PARAMS
 	.newlink		= wg_newlink,
-#else
-	.newlink 		= wg_newlink_old,
-#endif
 };
 
 static void wg_netns_pre_exit(struct net *net)

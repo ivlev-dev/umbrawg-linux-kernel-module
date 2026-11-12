@@ -72,7 +72,8 @@ the reboot afterwards.
 
 ## Manual build
 
-You may need to install kernel headers and/or build essentials packages before running following steps.
+Requirements: Linux **7.3+** headers matching the running kernel. A full kernel
+source tree is not needed.
 
 1. In Terminal:
     ```shell
@@ -80,28 +81,32 @@ You may need to install kernel headers and/or build essentials packages before r
     cd amneziawg-linux-kernel-module/src
     ```
 
-2. Now, if you run modern Linux with kernel version 5.6+, you need to download your kernel's source from anywhere possible
-and link resulting tree to `kernel` symlink:
-    
-    ```shell
-    ln -s /path/to/kernel/source kernel
-    ```
-    
-    Please note to find and provide full kernel sourcetree, not only headers. **If you run on legacy kernel (<5.6), you do not need to perform this step.**
-
-3. Now perform build and installation:
+2. Development build. The module is called `umbra-wg` and can be loaded next to
+a running `amneziawg` without a genetlink/rtnl conflict:
     ```shell
     make
     sudo make install
+    sudo modprobe umbra_wg
     ```
-   
-    Or on a capable system you may want to use DKMS for this:
+
+3. Release build with the compatible identity (`amneziawg`, same netlink and
+wire ABI):
     ```shell
-    sudo make dkms-install
+    make AWG_NAME=amneziawg
+    sudo make install
+    sudo modprobe amneziawg
+    ```
+
+4. Or use DKMS for the release build:
+    ```shell
+    sudo make dkms-install AWG_NAME=amneziawg
     sudo dkms add -m amneziawg -v 1.0.0
     sudo dkms build -m amneziawg -v 1.0.0
     sudo dkms install -m amneziawg -v 1.0.0
     ```
+
+If the kernel was built with clang, the build system detects it and uses
+`LLVM=1` automatically.
 
 ## Configuration
 
@@ -127,7 +132,7 @@ and link resulting tree to `kernel` symlink:
 To get more details, you can enable the dynamic debug feature for the module:
 
 ```shell
-echo "module amneziawg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
+echo "module umbra_wg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
 ```
 
 This will log messages to dmesg, which can be watched live with:
@@ -151,16 +156,9 @@ This setting should persist for future and will not require repeating.
 
 ### Kernel sourcetree could not be found automatically
 
-In some rare cases, setup script may not find your kernel's sourcetree automatically. You may find appropriate sources by yourself
-then and link them to DKMS module sources, e.g.
-
-```shell
-ln -s /path/to/your/kernel/sources /usr/src/amneziawg-1.0.0/kernel
-```
-
-Reinstall the package thereafter and you should get everything working.
-
-Should you upgrade your kernel in the future, please remember that you may also need refresh sourcetree and update symlinks.
+Kernel 7.3+ builds use only the installed headers; a kernel source tree is no
+longer required. If a distribution ships incomplete headers, install the
+matching `linux-headers` package for the running kernel.
 
 ## License
 

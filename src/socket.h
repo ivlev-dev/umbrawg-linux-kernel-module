@@ -29,6 +29,8 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
 					  const struct sk_buff *skb);
 void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer);
+void wg_socket_get_peer_endpoint(const struct wg_peer *peer,
+				 struct endpoint *endpoint);
 
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 #define net_dbg_skb_ratelimited(fmt, dev, skb, ...) do {                       \

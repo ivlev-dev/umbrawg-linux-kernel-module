@@ -65,6 +65,7 @@ struct packet_cb {
 	u32 padding;
 	u8 ds;
 	bool is_keepalive;
+	bool parallel;
 };
 
 #define PACKET_CB(skb) ((struct packet_cb *)((skb)->cb))
@@ -82,13 +83,7 @@ static inline void wg_reset_packet(struct sk_buff *skb, bool encapsulating)
 	u8 sw_hash = skb->sw_hash;
 	u32 hash = skb->hash;
 	skb_scrub_packet(skb, true);
-#ifdef COMPAT_SKB_HAS_SKB_START
-	memset(&skb->headers_start, 0,
-	       offsetof(struct sk_buff, headers_end) -
-		       offsetof(struct sk_buff, headers_start));
-#else
 	memset(&skb->headers, 0, sizeof(skb->headers));
-#endif
 	if (encapsulating) {
 		skb->l4_hash = l4_hash;
 		skb->sw_hash = sw_hash;
@@ -161,6 +156,20 @@ static inline struct sk_buff *wg_prev_queue_peek(struct prev_queue *queue)
 static inline void wg_prev_queue_drop_peeked(struct prev_queue *queue)
 {
 	queue->peeked = NULL;
+}
+
+static inline int wg_queue_enqueue_per_device(
+	struct crypt_queue *device_queue, struct sk_buff *skb,
+	struct workqueue_struct *wq)
+{
+	int cpu;
+
+	atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
+	cpu = wg_cpumask_next_online(&device_queue->last_cpu);
+	if (unlikely(ptr_ring_produce_bh(&device_queue->ring, skb)))
+		return -EPIPE;
+	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
+	return 0;
 }
 
 static inline int wg_queue_enqueue_per_device_and_peer(

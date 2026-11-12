@@ -15,6 +15,7 @@
 #include <linux/types.h>
 #include <linux/netfilter.h>
 #include <linux/spinlock.h>
+#include <linux/seqlock.h>
 #include <linux/kref.h>
 #include <net/dst_cache.h>
 
@@ -47,13 +48,15 @@ struct wg_peer {
 	struct noise_keypairs keypairs;
 	struct endpoint endpoint;
 	struct dst_cache endpoint_cache;
-	rwlock_t endpoint_lock;
+	seqlock_t endpoint_lock;
 	struct noise_handshake handshake;
 	atomic64_t last_sent_handshake;
 	struct work_struct transmit_handshake_work, clear_peer_work, transmit_packet_work;
 	struct cookie latest_cookie;
 	struct hlist_node pubkey_hash;
-	u64 rx_bytes, tx_bytes;
+	atomic64_t rx_bytes, tx_bytes;
+	int tx_cpu;
+	bool tx_parallel;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
 	struct timer_list timer_persistent_keepalive;

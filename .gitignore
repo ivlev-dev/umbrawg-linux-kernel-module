@@ -3,6 +3,7 @@ cscope.out
 *.d
 *.dwo
 *.ko
+*.mod
 *.mod.c
 *.a
 Module.symvers
@@ -20,10 +21,7 @@ src/tests/qemu/distfiles/
 *.nam
 *.til
 .cache.mk
-src/crypto/zinc/*/*.S
-src/amneziawg.mod
-src/generated
-src/kernel
+scripts/dev/awg-umbra
 .cache
 compile_commands.json
 .clangd

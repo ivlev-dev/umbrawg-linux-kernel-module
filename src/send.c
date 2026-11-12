@@ -14,9 +14,6 @@
 #include "cookie.h"
 #include "type.h"
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-#include <linux/simd.h>
-#endif
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
 #include <linux/socket.h>
@@ -222,8 +219,7 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 	return padded_size - last_unit;
 }
 
-static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
-	COMPAT_MAYBE_SIMD_CONTEXT(simd_context_t *simd_context))
+static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 {
 	struct wg_peer *peer = keypair->entry.peer;
 	unsigned int padding_len, plaintext_len, trailer_len, packet_len;
@@ -307,8 +303,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 		return false;
 	return chacha20poly1305_encrypt_sg_inplace(sg, plaintext_len, NULL, 0,
 						   PACKET_CB(skb)->nonce,
-						   keypair->sending.key
-							COMPAT_MAYBE_SIMD_CONTEXT(simd_context));
+						   keypair->sending.key);
 }
 
 void wg_packet_send_keepalive(struct wg_peer *peer)
@@ -385,53 +380,66 @@ void wg_packet_encrypt_worker(struct work_struct *work)
 						 work)->ptr;
 	struct sk_buff *first, *skb, *next;
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_context_t simd_context;
-	simd_get(&simd_context);
-#endif
 	while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
-		enum packet_state state = PACKET_STATE_CRYPTED;
+		struct wg_peer *peer = PACKET_PEER(first);
+		struct noise_keypair *keypair = PACKET_CB(first)->keypair;
+		bool parallel = PACKET_CB(first)->parallel;
+		bool ok = true;
 
 		skb_list_walk_safe(first, skb, next) {
-			if (likely(encrypt_packet(
-						  skb,
-						  PACKET_CB(first)->keypair
-						  COMPAT_MAYBE_SIMD_CONTEXT(&simd_context)))) {
+			if (likely(encrypt_packet(skb, keypair))) {
 				wg_reset_packet(skb, true);
 			} else {
-				state = PACKET_STATE_DEAD;
+				ok = false;
 				break;
 			}
 		}
-		wg_queue_enqueue_per_peer_tx(first, state);
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-		simd_relax(&simd_context);
-#endif
+		if (parallel) {
+			if (likely(ok))
+				wg_packet_create_data_done(peer, first);
+			else
+				kfree_skb_list(first);
+			wg_noise_keypair_put(keypair, false);
+			wg_peer_put(peer);
+		} else {
+			wg_queue_enqueue_per_peer_tx(first, ok ? PACKET_STATE_CRYPTED :
+								PACKET_STATE_DEAD);
+		}
+
 		if (need_resched())
 			cond_resched();
 	}
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_put(&simd_context);
-#endif
 }
 
 static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
 {
 	struct wg_device *wg = peer->device;
+	bool parallel = READ_ONCE(peer->tx_parallel);
 	int ret = -EINVAL;
+
+	PACKET_CB(first)->parallel = parallel;
 
 	rcu_read_lock_bh();
 	if (unlikely(READ_ONCE(peer->is_dead)))
 		goto err;
 
-	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
-						   wg->packet_crypt_wq);
-	if (unlikely(ret == -EPIPE))
-		wg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
+	if (parallel) {
+		ret = wg_queue_enqueue_per_device(&wg->encrypt_queue, first,
+						  wg->packet_crypt_wq);
+	} else {
+		ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue,
+							  &peer->tx_queue, first,
+							  wg->packet_crypt_wq);
+		if (unlikely(ret == -EPIPE)) {
+			rcu_read_unlock_bh();
+			wg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
+			return;
+		}
+	}
 err:
 	rcu_read_unlock_bh();
-	if (likely(!ret || ret == -EPIPE))
+	if (likely(!ret))
 		return;
 	wg_noise_keypair_put(PACKET_CB(first)->keypair, false);
 	wg_peer_put(peer);

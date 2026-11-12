@@ -16,9 +16,9 @@ MAYBE_DEBUG :=
 endif
 
 insert: debug
-	-modinfo -F depends wireguard.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
-	-sudo rmmod wireguard
-	-sudo insmod wireguard.ko
+	-modinfo -F depends umbra-wg.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
+	-sudo rmmod umbra_wg
+	-sudo insmod umbra-wg.ko
 
 test: insert
 	sudo PATH="$$PATH:/usr/sbin:/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin" ./tests/netns.sh

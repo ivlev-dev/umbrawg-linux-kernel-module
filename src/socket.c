@@ -165,23 +165,34 @@ out:
 #endif
 }
 
+void wg_socket_get_peer_endpoint(const struct wg_peer *peer,
+				 struct endpoint *endpoint)
+{
+	unsigned int seq;
+
+	do {
+		seq = read_seqbegin(&peer->endpoint_lock);
+		*endpoint = peer->endpoint;
+	} while (read_seqretry(&peer->endpoint_lock, seq));
+}
+
 int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb, u8 ds)
 {
 	size_t skb_len = skb->len;
+	struct endpoint endpoint;
 	int ret = -EAFNOSUPPORT;
 
-	read_lock_bh(&peer->endpoint_lock);
-	if (peer->endpoint.addr.sa_family == AF_INET)
-		ret = send4(peer->device, skb, &peer->endpoint, ds,
+	wg_socket_get_peer_endpoint(peer, &endpoint);
+	if (endpoint.addr.sa_family == AF_INET)
+		ret = send4(peer->device, skb, &endpoint, ds,
 			    &peer->endpoint_cache);
-	else if (peer->endpoint.addr.sa_family == AF_INET6)
-		ret = send6(peer->device, skb, &peer->endpoint, ds,
+	else if (endpoint.addr.sa_family == AF_INET6)
+		ret = send6(peer->device, skb, &endpoint, ds,
 			    &peer->endpoint_cache);
 	else
 		dev_kfree_skb(skb);
 	if (likely(!ret))
-		peer->tx_bytes += skb_len;
-	read_unlock_bh(&peer->endpoint_lock);
+		atomic64_add(skb_len, &peer->tx_bytes);
 
 	return ret;
 }
@@ -313,14 +324,12 @@ static bool endpoint_eq(const struct endpoint *a, const struct endpoint *b)
 void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 				 const struct endpoint *endpoint)
 {
-	/* First we check unlocked, in order to optimize, since it's pretty rare
-	 * that an endpoint will change. If we happen to be mid-write, and two
-	 * CPUs wind up writing the same thing or something slightly different,
-	 * it doesn't really matter much either.
-	 */
-	if (endpoint_eq(endpoint, &peer->endpoint))
+	struct endpoint cur;
+
+	wg_socket_get_peer_endpoint(peer, &cur);
+	if (endpoint_eq(endpoint, &cur))
 		return;
-	write_lock_bh(&peer->endpoint_lock);
+	write_seqlock_bh(&peer->endpoint_lock);
 	if (endpoint->addr.sa_family == AF_INET) {
 		peer->endpoint.addr4 = endpoint->addr4;
 		peer->endpoint.src4 = endpoint->src4;
@@ -332,8 +341,8 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 		goto out;
 	}
 	dst_cache_reset(&peer->endpoint_cache);
-out:
-	write_unlock_bh(&peer->endpoint_lock);
+	out:
+	write_sequnlock_bh(&peer->endpoint_lock);
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
 }
 
@@ -348,10 +357,10 @@ void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
 
 void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer)
 {
-	write_lock_bh(&peer->endpoint_lock);
+	write_seqlock_bh(&peer->endpoint_lock);
 	memset(&peer->endpoint.src6, 0, sizeof(peer->endpoint.src6));
 	dst_cache_reset_now(&peer->endpoint_cache);
-	write_unlock_bh(&peer->endpoint_lock);
+	write_sequnlock_bh(&peer->endpoint_lock);
 }
 
 static int wg_receive(struct sock *sk, struct sk_buff *skb)

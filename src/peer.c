@@ -50,16 +50,16 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	INIT_WORK(&peer->transmit_packet_work, wg_packet_tx_worker);
 	wg_prev_queue_init(&peer->tx_queue);
 	wg_prev_queue_init(&peer->rx_queue);
-	rwlock_init(&peer->endpoint_lock);
+	peer->tx_cpu = -1;
+	seqlock_init(&peer->endpoint_lock);
 	kref_init(&peer->refcount);
+	atomic64_set(&peer->rx_bytes, 0);
+	atomic64_set(&peer->tx_bytes, 0);
 	skb_queue_head_init(&peer->staged_packet_queue);
 	wg_peer_reset_last_sent_handshake(peer);
 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
-#ifdef COMPAT_NETIF_HAS_WEIGHT
-	netif_napi_add(wg->dev, &peer->napi, wg_packet_rx_poll, NAPI_POLL_WEIGHT);
-#else
-	netif_napi_add(wg->dev, &peer->napi, wg_packet_rx_poll);
-#endif
+	netif_napi_add_weight(wg->dev, &peer->napi, wg_packet_rx_poll,
+			      NAPI_POLL_WEIGHT);
 	napi_enable(&peer->napi);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 	INIT_LIST_HEAD(&peer->allowedips_list);

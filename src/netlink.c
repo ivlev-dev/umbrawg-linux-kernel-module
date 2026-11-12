@@ -11,6 +11,7 @@
 #include "queueing.h"
 #include "messages.h"
 #include "type.h"
+#include "awg_identity.h"
 #include "uapi/wireguard.h"
 #include <linux/if.h>
 #include <net/genetlink.h>
@@ -108,7 +109,7 @@ static struct wg_device *lookup_interface(struct nlattr **attrs,
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 	if (!dev->rtnl_link_ops || !dev->rtnl_link_ops->kind ||
-	    strcmp(dev->rtnl_link_ops->kind, KBUILD_MODNAME)) {
+	    strcmp(dev->rtnl_link_ops->kind, AWG_NAME)) {
 		dev_put(dev);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
@@ -328,39 +329,44 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 			    sizeof(last_handshake), &last_handshake) ||
 		    nla_put_u32(skb, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
 				peer->persistent_keepalive_interval) ||
-		    nla_put_u64_64bit(skb, WGPEER_A_TX_BYTES, peer->tx_bytes,
+		    nla_put_u64_64bit(skb, WGPEER_A_TX_BYTES,
+				      atomic64_read(&peer->tx_bytes),
 				      WGPEER_A_UNSPEC) ||
-		    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES, peer->rx_bytes,
+		    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES,
+				      atomic64_read(&peer->rx_bytes),
 				      WGPEER_A_UNSPEC) ||
 		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
 			goto err;
 
 #ifndef OMIT_ENDPOINTS
-		read_lock_bh(&peer->endpoint_lock);
-		if (peer->endpoint.addr.sa_family == AF_INET) {
-			struct sockaddr_in addr4 = peer->endpoint.addr4;
+		{
+			struct endpoint endpoint;
 
-			if (bogus_endpoints) {
-				ret = generate_ipv4_address_with_prefix(&prefix, &addr4.sin_addr.s_addr);
-				if (ret < 0)
-					goto err;
+			wg_socket_get_peer_endpoint(peer, &endpoint);
+			if (endpoint.addr.sa_family == AF_INET) {
+				struct sockaddr_in addr4 = endpoint.addr4;
+
+				if (bogus_endpoints) {
+					ret = generate_ipv4_address_with_prefix(&prefix, &addr4.sin_addr.s_addr);
+					if (ret < 0)
+						goto err;
+				}
+
+				fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
+			} else if (endpoint.addr.sa_family == AF_INET6) {
+				struct sockaddr_in6 addr6 = endpoint.addr6;
+
+				if (bogus_endpoints) {
+					ret = generate_ipv6_address_with_prefix(&prefix6, addr6.sin6_addr.s6_addr);
+					if (ret < 0)
+						goto err;
+				}
+
+				fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr6), &addr6);
 			}
-
-			fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
-		} else if (peer->endpoint.addr.sa_family == AF_INET6) {
-			struct sockaddr_in6 addr6 = peer->endpoint.addr6;
-
-			if (bogus_endpoints) {
-				ret = generate_ipv6_address_with_prefix(&prefix6, addr6.sin6_addr.s6_addr);
-				if (ret < 0)
-					goto err;
-			}
-
-			fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr6), &addr6);
+			if (fail)
+				goto err;
 		}
-		read_unlock_bh(&peer->endpoint_lock);
-		if (fail)
-			goto err;
 #endif
 		allowedips_node =
 			list_first_entry_or_null(&peer->allowedips_list,
@@ -473,15 +479,12 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				nla_put_string(skb, WGDEVICE_A_I5, wg->ispecs[4].desc)))
 			goto out;
 
-		down_read(&wg->header_protection.lock);
-		if (wg->header_protection.has_protection) {
+		if (awg_header_protection_enabled(&wg->header_protection)) {
 			awg_header_protection_get_key(&wg->header_protection, buf);
-			if (nla_put(skb, WGDEVICE_A_HEADER_PROTECTION_KEY, HEADER_PROTECTION_KEY_SIZE, buf)) {
-				up_read(&wg->header_protection.lock);
+			if (nla_put(skb, WGDEVICE_A_HEADER_PROTECTION_KEY,
+				    HEADER_PROTECTION_KEY_SIZE, buf))
 				goto out;
-			}
 		}
-		up_read(&wg->header_protection.lock);
 
 		down_read(&wg->static_identity.lock);
 		if (wg->static_identity.has_identity) {
@@ -763,7 +766,7 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
 
-	has_protection = wg->header_protection.has_protection ||
+	has_protection = awg_header_protection_enabled(&wg->header_protection) ||
 		info->attrs[WGDEVICE_A_HEADER_PROTECTION_KEY];
 
 	if (info->attrs[WGDEVICE_A_FLAGS])
@@ -977,8 +980,10 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
-		awg_header_protection_set_key(&wg->header_protection,
+		ret = awg_header_protection_set_key(&wg->header_protection,
 			nla_data(info->attrs[WGDEVICE_A_HEADER_PROTECTION_KEY]));
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_CONTENT_PADDING_ADDITION])
@@ -1070,29 +1075,16 @@ out_nodev:
 	return ret;
 }
 
-#ifndef COMPAT_CANNOT_USE_CONST_GENL_OPS
-static const
-#else
-static
-#endif
-struct genl_ops genl_ops[] = {
+static const struct genl_ops genl_ops[] = {
 	{
 		.cmd = WG_CMD_GET_DEVICE,
-#ifndef COMPAT_CANNOT_USE_NETLINK_START
 		.start = wg_get_device_start,
-#endif
 		.dumpit = wg_get_device_dump,
 		.done = wg_get_device_done,
-#ifdef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
-		.policy = device_policy,
-#endif
 		.flags = GENL_UNS_ADMIN_PERM
 	}, {
 		.cmd = WG_CMD_SET_DEVICE,
 		.doit = wg_set_device,
-#ifdef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
-		.policy = device_policy,
-#endif
 		.flags = GENL_UNS_ADMIN_PERM
 	}
 };
@@ -1103,29 +1095,18 @@ static const struct genl_multicast_group wg_genl_mcgrps[] = {
 	}
 };
 
-static struct genl_family genl_family
-#ifndef COMPAT_CANNOT_USE_GENL_NOPS
-__ro_after_init = {
+static struct genl_family genl_family __ro_after_init = {
 	.ops = genl_ops,
 	.n_ops = ARRAY_SIZE(genl_ops),
-#else
-= {
-#endif
-#ifdef COMPAT_GENL_HAS_RESV_START_OP
 	.resv_start_op = WG_CMD_SET_DEVICE + 1,
-#endif
-	.name = WG_GENL_NAME,
+	.name = AWG_NAME,
 	.version = WG_GENL_VERSION,
 	.maxattr = WGDEVICE_A_MAX,
 	.module = THIS_MODULE,
-#ifndef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
 	.policy = device_policy,
-#endif
 	.netnsok = true,
-#ifndef COMPAT_CANNOT_USE_NETLINK_MCGRPS
 	.mcgrps = wg_genl_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(wg_genl_mcgrps)
-#endif
 };
 
 int __init wg_genetlink_init(void)

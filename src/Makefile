@@ -4,17 +4,30 @@
 
 WIREGUARD_VERSION = 1.0.0
 OMIT_ENDPOINTS ?=
+AWG_NAME ?= umbra-wg
 
 KERNELRELEASE ?= $(shell uname -r)
 KERNELDIR ?= /lib/modules/$(KERNELRELEASE)/build
 PREFIX ?= /usr
 DESTDIR ?=
 SRCDIR ?= $(PREFIX)/src
-DKMSDIR ?= $(SRCDIR)/amneziawg-$(WIREGUARD_VERSION)
+DKMSDIR ?= $(SRCDIR)/umbra-wg-$(WIREGUARD_VERSION)
 DEPMOD ?= depmod
 DEPMODBASEDIR ?= /
 
 PWD := $(shell pwd)
+
+ifeq ($(LLVM),)
+ifneq ($(shell test -f $(KERNELDIR)/.config && grep -qs '^CONFIG_CC_IS_CLANG=y' $(KERNELDIR)/.config && echo yes),)
+LLVM := 1
+endif
+endif
+
+KMAKE = $(MAKE) -C $(KERNELDIR) M=$(PWD) \
+	AWG_NAME="$(AWG_NAME)" \
+	$(if $(LLVM),LLVM=$(LLVM),) \
+	WIREGUARD_VERSION="$(WIREGUARD_VERSION)" \
+	OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"
 
 all: module
 debug: module-debug
@@ -24,22 +37,22 @@ MAKEFLAGS += --no-print-directory
 endif
 
 module:
-	@$(MAKE) -C $(KERNELDIR) M=$(PWD) WIREGUARD_VERSION="$(WIREGUARD_VERSION)" OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)" modules
+	@$(KMAKE) modules
 
 module-debug:
-	@$(MAKE) -C $(KERNELDIR) M=$(PWD) V=1 CONFIG_AMNEZIAWG_DEBUG=y WIREGUARD_VERSION="$(WIREGUARD_VERSION)" OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)" modules
+	@$(KMAKE) V=1 CONFIG_UMBRA_WG_DEBUG=y modules
 
 clean:
 	@$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
 
 module-install:
-	@$(MAKE) -C $(KERNELDIR) M=$(PWD) WIREGUARD_VERSION="$(WIREGUARD_VERSION)" OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)" modules_install
+	@$(KMAKE) modules_install
 	$(DEPMOD) -b "$(DEPMODBASEDIR)" -a $(KERNELRELEASE)
 
 install: module-install
 
 rwildcard=$(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
-DKMS_SOURCES := version.h Makefile Kbuild Kconfig dkms.conf $(filter-out version.h wireguard.mod.c tests/%,$(call rwildcard,,*.c *.h *.S *.pl *.include))
+DKMS_SOURCES := version.h Makefile Kbuild Kconfig dkms.conf awg_identity.h $(filter-out version.h wireguard.mod.c tests/% awg_identity.h,$(call rwildcard,,*.c *.h *.S *.include))
 dkms-install: $(DKMS_SOURCES)
 	@$(foreach f,$(DKMS_SOURCES),install -v -m0644 -D $(f) $(DESTDIR)$(DKMSDIR)/$(f);)
 
@@ -47,14 +60,11 @@ style:
 	$(KERNELDIR)/scripts/checkpatch.pl -f --max-line-length=4000 --codespell --color=always $(filter-out wireguard.mod.c,$(wildcard *.c)) $(wildcard *.h) $(wildcard selftest/*.c)
 
 check: clean
-	scan-build --html-title=wireguard-linux-compat -maxloop 100 --view --keep-going $(MAKE) module CONFIG_WIREGUARD_DEBUG=y C=2 CF="-D__CHECK_ENDIAN__"
+	scan-build --html-title=umbra-wg -maxloop 100 --view --keep-going $(MAKE) module CONFIG_UMBRA_WG_DEBUG=y C=2 CF="-D__CHECK_ENDIAN__"
 
 coccicheck: clean
-	@$(MAKE) -C $(KERNELDIR) M=$(PWD) CONFIG_WIREGUARD_DEBUG=y coccicheck MODE=report
-
-cloc:
-	@cloc --skip-uniqueness --by-file --extract-with="$$(readlink -f ../kernel-tree-scripts/filter-compat-defines.sh) >FILE< > \$$(basename >FILE<)" $(filter-out wireguard.mod.c,$(wildcard *.c)) $(wildcard *.h)
+	@$(MAKE) -C $(KERNELDIR) M=$(PWD) CONFIG_UMBRA_WG_DEBUG=y coccicheck MODE=report
 
 -include tests/debug.mk
 
-.PHONY: all module module-debug apply-patches module-install install dkms-install clean cloc check style
+.PHONY: all module module-debug module-install install dkms-install clean check style

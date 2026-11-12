@@ -1,15 +1,13 @@
-config AMNEZIAWG
-	tristate "IP: AmneziaWG secure network tunnel"
+config UMBRA_WG
+	tristate "IP: UmbraWG secure network tunnel"
 	depends on NET && INET
 	depends on IPV6 || !IPV6
 	select NET_UDP_TUNNEL
 	select DST_CACHE
-	select CRYPTO
-	select CRYPTO_ALGAPI
-	select VFP
-	select VFPv3 if CPU_V7
-	select NEON if CPU_V7
-	select KERNEL_MODE_NEON if CPU_V7
+	select CRYPTO_LIB_CHACHA20POLY1305
+	select CRYPTO_LIB_CURVE25519
+	select CRYPTO_LIB_BLAKE2S
+	select CRYPTO_LIB_UTILS
 	default m
 	help
 	  WireGuard is a secure, fast, and easy to use replacement for IPsec
@@ -21,9 +19,9 @@ config AMNEZIAWG
 	  It's safe to say Y or M here, as the driver is very lightweight and
 	  is only in use when an administrator chooses to add an interface.
 
-config AMNEZIAWG_DEBUG
+config UMBRA_WG_DEBUG
 	bool "Debugging checks and verbose messages"
-	depends on AMNEZIAWG
+	depends on UMBRA_WG
 	help
 	  This will write log messages for handshake and other events
 	  that occur for a WireGuard interface. It will also perform some
