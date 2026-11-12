@@ -130,8 +130,17 @@ static int wg_stop(struct net_device *dev)
 		wg_peer_reset_last_sent_handshake(peer);
 	}
 	mutex_unlock(&wg->device_update_lock);
-	while ((skb = ptr_ring_consume(&wg->handshake_queue.ring)) != NULL)
-		kfree_skb(skb);
+	{
+		int cpu;
+
+		for_each_possible_cpu(cpu) {
+			struct ptr_ring *ring =
+				per_cpu_ptr(wg->handshake_queue.ring, cpu);
+
+			while ((skb = ptr_ring_consume(ring)) != NULL)
+				kfree_skb(skb);
+		}
+	}
 	atomic_set(&wg->handshake_queue_len, 0);
 	wg_socket_reinit(wg, NULL, NULL);
 	return 0;

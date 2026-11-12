@@ -380,7 +380,7 @@ void wg_packet_encrypt_worker(struct work_struct *work)
 						 work)->ptr;
 	struct sk_buff *first, *skb, *next;
 
-	while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
+	while ((first = wg_crypt_queue_consume(queue)) != NULL) {
 		struct wg_peer *peer = PACKET_PEER(first);
 		struct noise_keypair *keypair = PACKET_CB(first)->keypair;
 		bool parallel = PACKET_CB(first)->parallel;

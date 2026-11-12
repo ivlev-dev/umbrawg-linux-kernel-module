@@ -48,9 +48,12 @@ peers/                peer lifecycle, allowedips, lookup
     список, без per-peer сериализации;
   - выбор фиксируется в `PACKET_CB(first)->parallel` на время обработки
     списка.
-- RX: per-CPU decrypt-worker + per-peer NAPI (порядок и replay window
-  сохраняются).
+- RX: per-CPU кольца decrypt-worker'ов с work-stealing (порядок и replay
+  window сохраняются per-peer NAPI).
 - Конфиг (padding, junk, заголовки) читается датапасом без локов.
+- Очереди крипто-воркеров распределены по CPU (`struct ptr_ring __percpu`),
+  producer-lock больше не общий; при пустом локальном кольце воркер забирает
+  работу из чужих (`wg_crypt_queue_consume`).
 
 ## Что используется из 7.3
 

@@ -27,6 +27,8 @@ UWG_HP_KEY=${UWG_HP_KEY:-}
 TOOL="$ROOT/scripts/dev/uwg"
 KIND=umbrawg
 MODULE=umbrawg
+MODULE_PATH=${UWG_MODULE:-$ROOT/src/umbrawg.ko}
+LABEL=${UWG_LABEL:-$MODE}
 
 [ "$MODE" = umbrawg ] || {
 	echo "unknown mode: $MODE" >&2
@@ -53,7 +55,7 @@ if ! grep -q "^$MODULE " /proc/modules; then
 	for mod in udp_tunnel ip6_udp_tunnel libcurve25519; do
 		modprobe "$mod" 2>/dev/null || true
 	done
-	insmod "$ROOT/src/umbrawg.ko"
+	insmod "$MODULE_PATH"
 	LOADED=1
 fi
 
@@ -170,7 +172,7 @@ while [ "$rep" -le "$REPS" ]; do
 	sleep 0.3
 done
 
-awk -v mode="$MODE" -v cname="$CASE" -v cpu="$CPU" '
+awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '
 { b[NR] = $2; p[NR] = $3; u[NR] = $4 }
 END {
 	n = NR

@@ -7,6 +7,8 @@
 #define _WG_QUEUEING_H
 
 #include "peer.h"
+#include <linux/percpu.h>
+#include <linux/smp.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
@@ -158,6 +160,25 @@ static inline void wg_prev_queue_drop_peeked(struct prev_queue *queue)
 	queue->peeked = NULL;
 }
 
+static inline struct sk_buff *wg_crypt_queue_consume(struct crypt_queue *queue)
+{
+	struct sk_buff *skb;
+	int cpu, self = raw_smp_processor_id();
+
+	skb = ptr_ring_consume_bh(per_cpu_ptr(queue->ring, self));
+	if (skb)
+		return skb;
+
+	for_each_online_cpu(cpu) {
+		if (cpu == self)
+			continue;
+		skb = ptr_ring_consume_bh(per_cpu_ptr(queue->ring, cpu));
+		if (skb)
+			return skb;
+	}
+	return NULL;
+}
+
 static inline int wg_queue_enqueue_per_device(
 	struct crypt_queue *device_queue, struct sk_buff *skb,
 	struct workqueue_struct *wq)
@@ -166,7 +187,7 @@ static inline int wg_queue_enqueue_per_device(
 
 	atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
 	cpu = wg_cpumask_next_online(&device_queue->last_cpu);
-	if (unlikely(ptr_ring_produce_bh(&device_queue->ring, skb)))
+	if (unlikely(ptr_ring_produce_bh(per_cpu_ptr(device_queue->ring, cpu), skb)))
 		return -EPIPE;
 	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
 	return 0;
@@ -189,7 +210,7 @@ static inline int wg_queue_enqueue_per_device_and_peer(
 	 * packet as soon as it can.
 	 */
 	cpu = wg_cpumask_next_online(&device_queue->last_cpu);
-	if (unlikely(ptr_ring_produce_bh(&device_queue->ring, skb)))
+	if (unlikely(ptr_ring_produce_bh(per_cpu_ptr(device_queue->ring, cpu), skb)))
 		return -EPIPE;
 	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
 	return 0;

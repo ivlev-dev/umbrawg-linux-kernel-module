@@ -288,7 +288,7 @@ void wg_packet_handshake_receive_worker(struct work_struct *work)
 	struct wg_device *wg = container_of(queue, struct wg_device, handshake_queue);
 	struct sk_buff *skb;
 
-	while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
+	while ((skb = wg_crypt_queue_consume(queue)) != NULL) {
 		wg_receive_handshake_packet(wg, skb);
 		dev_kfree_skb(skb);
 		atomic_dec(&wg->handshake_queue_len);
@@ -591,7 +591,7 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 						 work)->ptr;
 	struct sk_buff *skb;
 
-	while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
+	while ((skb = wg_crypt_queue_consume(queue)) != NULL) {
 		enum packet_state state =
 			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
 				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
@@ -643,17 +643,21 @@ void wg_packet_receive(struct wg_device *wg, struct sk_buff *skb)
 	case MESSAGE_HANDSHAKE_INITIATION:
 	case MESSAGE_HANDSHAKE_RESPONSE:
 	case MESSAGE_HANDSHAKE_COOKIE: {
-		int cpu, ret = -EBUSY;
+		struct ptr_ring *ring;
+		int cpu;
+		int ret = -EBUSY;
 
 		if (unlikely(!rng_is_initialized()))
 			goto drop;
+		cpu = wg_cpumask_next_online(&wg->handshake_queue.last_cpu);
+		ring = per_cpu_ptr(wg->handshake_queue.ring, cpu);
 		if (atomic_read(&wg->handshake_queue_len) > MAX_QUEUED_INCOMING_HANDSHAKES / 2) {
-			if (spin_trylock_bh(&wg->handshake_queue.ring.producer_lock)) {
-				ret = __ptr_ring_produce(&wg->handshake_queue.ring, skb);
-				spin_unlock_bh(&wg->handshake_queue.ring.producer_lock);
+			if (spin_trylock_bh(&ring->producer_lock)) {
+				ret = __ptr_ring_produce(ring, skb);
+				spin_unlock_bh(&ring->producer_lock);
 			}
 		} else
-			ret = ptr_ring_produce_bh(&wg->handshake_queue.ring, skb);
+			ret = ptr_ring_produce_bh(ring, skb);
 		if (ret) {
 	drop:
 			net_dbg_skb_ratelimited("%s: Dropping handshake packet from %pISpfsc\n",
@@ -661,7 +665,6 @@ void wg_packet_receive(struct wg_device *wg, struct sk_buff *skb)
 			goto err;
 		}
 		atomic_inc(&wg->handshake_queue_len);
-		cpu = wg_cpumask_next_online(&wg->handshake_queue.last_cpu);
 		/* Queues up a call to packet_process_queued_handshake_packets(skb): */
 		queue_work_on(cpu, wg->handshake_receive_wq,
 			      &per_cpu_ptr(wg->handshake_queue.worker, cpu)->work);

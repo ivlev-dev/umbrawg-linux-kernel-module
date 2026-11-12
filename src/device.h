@@ -29,7 +29,7 @@ struct multicore_worker {
 };
 
 struct crypt_queue {
-	struct ptr_ring ring;
+	struct ptr_ring __percpu *ring;
 	struct multicore_worker __percpu *worker;
 	int last_cpu;
 };
