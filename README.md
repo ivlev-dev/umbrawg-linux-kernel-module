@@ -1,165 +1,143 @@
-# AmneziaWG kernel module
+# UmbraWG — модуль ядра Linux
 
-## Table of contents
+Модуль ядра для защищённых туннелей с обфускацией трафика. Wire-формат
+совместим с предыдущей реализацией, но интерфейсы ядра переименованы:
+genetlink-семейство, rtnl-kind и тип устройства теперь `umbrawg`.
 
-- [Installation](#installation)
-  - [Ubuntu](#ubuntu)
-  - [Debian](#debian)
-  - [Linux Mint](#linux-mint)
-  - [RHEL/CentOS/SUSE/Fedora Core](#rhelcentossusefedora-core)
-- [Manual build](#manual-build)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+Проект поддерживает только Linux **7.3+**. Поддержка старых ядер, а также
+`compat`-слой и встроенная копия криптографии удалены.
 
-## Installation
+## Требования
 
-### Ubuntu
+- Linux 7.3+ и заголовки ядра (`linux-headers` / `kernel-devel`);
+- `make`, компилятор, которым собрано ядро (clang или gcc);
+- модули `libcurve25519`, `udp_tunnel`, `ip6_udp_tunnel`;
+- утилита `uwg` для конфигурации (см. ниже).
 
-Open `Terminal` and proceed with following instructions:
+Исходники ядра не нужны — достаточно установленных заголовков.
 
-1. (Optionally) Upgrade your system to latest packages including latest available kernel by running `apt-get full-upgrade`.
-After kernel upgrade reboot is required.
-2. Ensure that you have source repositories configured for APT - run `vi /etc/apt/sources.list` and make sure that there is
-at least one line starting with `deb-src` is present and uncommented.
-3. Install pre-requisites - run `sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)`.
-4. Run `sudo add-apt-repository ppa:amnezia/ppa`.
-5. Finally execute `sudo apt-get install -y amneziawg`.
+## Сборка и установка
 
-### Debian
+```sh
+git clone git@github.com:ivlev-dev/umbrawg-linux-kernel-module.git
+cd umbrawg-linux-kernel-module
 
-Open `Terminal` and do next steps:
-
-1. (Optionally) Upgrade your system to latest packages including latest available kernel by running `apt-get full-upgrade`.
-   After kernel upgrade reboot is required.
-2. Ensure that you have source repositories configured for APT - run `vi /etc/apt/sources.list` and make sure that there is
-   at least one line starting with `deb-src` is present and uncommented.
-3. Execute following commands:
-```shell
-sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)
-sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828
-echo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
-echo "deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
-sudo apt-get update
-sudo apt-get install -y amneziawg
+make -C src
+sudo make -C src install
+sudo modprobe umbrawg
 ```
 
-### Linux Mint
+Если ядро собрано clang-ом, сборочная система сама включает `LLVM=1`.
+Модуль будет называться `umbrawg.ko`.
 
-Open `Software Sources` and make sure that `Source code repositories` (under `Optional Sources`) are enabled.
+Проверка:
 
-Proceed to `PPAs` section and add `ppa:amnezia/ppa` PPA repository, after that save configuration and rebuild `apt` cache.
-
-After that, open `Terminal` and run:
-
-```shell
-sudo apt-get install -y amneziawg
+```sh
+sudo ip link add uwg0 type umbrawg
+ip -d link show uwg0
+sudo ip link del uwg0
 ```
 
-### RHEL/CentOS/SUSE/Fedora Core
+## Утилита `uwg`
 
-*If you use release that doesn't have DKMS support out of the box, you may need to install [EPEL](https://docs.fedoraproject.org/en-US/epel/#_quickstart) first.*
+`uwg` — userspace-утилита для настройки интерфейсов `umbrawg`. Она
+использует genetlink-семейство `umbrawg` и повторяет интерфейс команд
+WireGuard-совместимых утилит:
 
-Open `Terminal` and run:
-
-```shell
-sudo dnf copr enable amneziavpn/amneziawg
-sudo dnf install amneziawg-dkms amneziawg-tools
+```sh
+uwg genkey > private.key
+uwg pubkey < private.key > public.key
+uwg set uwg0 private-key private.key listen-port 51820
+uwg set uwg0 peer "$(cat peer-public.key)" \
+    allowed-ips 10.0.0.2/32 endpoint 203.0.113.5:51820
+uwg show uwg0
 ```
 
-Before installation it is strictly recommended to upgrade your system kernel to the latest available version and perform
-the reboot afterwards.
+Утилита поставляется отдельно. Для локальных тестов можно собрать шим из
+совместимого бинарника:
 
-## Manual build
-
-Requirements: Linux **7.3+** headers matching the running kernel. A full kernel
-source tree is not needed.
-
-1. In Terminal:
-    ```shell
-    git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
-    cd amneziawg-linux-kernel-module/src
-    ```
-
-2. Development build. The module is called `umbra-wg` and can be loaded next to
-a running `amneziawg` without a genetlink/rtnl conflict:
-    ```shell
-    make
-    sudo make install
-    sudo modprobe umbra_wg
-    ```
-
-3. Release build with the compatible identity (`amneziawg`, same netlink and
-wire ABI):
-    ```shell
-    make AWG_NAME=amneziawg
-    sudo make install
-    sudo modprobe amneziawg
-    ```
-
-4. Or use DKMS for the release build:
-    ```shell
-    sudo make dkms-install AWG_NAME=amneziawg
-    sudo dkms add -m amneziawg -v 1.0.0
-    sudo dkms build -m amneziawg -v 1.0.0
-    sudo dkms install -m amneziawg -v 1.0.0
-    ```
-
-If the kernel was built with clang, the build system detects it and uses
-`LLVM=1` automatically.
-
-## Configuration
-
-> [!IMPORTANT]
-> All parameters must be the same between Client and Server, except for Jc, Jmin, and Jmax - these may vary.
-
-- Jc — 1 ≤ Jc ≤ 128; recommended range is from 4 to 12 inclusive
-- Jmin — Jmax > Jmin < 1280*; recommended value is 8
-- Jmax — Jmin < Jmax ≤ 1280*; recommended value is 80
-- S1 — S1 ≤ 1132* (1280* - 148 = 1132); S1 + 56 ≠ S2; recommended range is from 15 to 150 inclusive
-- S2 — S2 ≤ 1188* (1280* - 92 = 1188); recommended range is from 15 to 150 inclusive
-- H1/H2/H3/H4 — must be unique among each other; recommended range is from 5 to 2147483647 inclusive
-
-`* Assuming a basic internet connection with an MTU value of 1280.`
-
-## Troubleshooting
-
-> [!TIP]
-> Please check [Ubuntu Server documentation](https://documentation.ubuntu.com/server/how-to/wireguard-vpn/troubleshooting) for more troubleshooting steps.
-
-### Enable debug logging
-
-To get more details, you can enable the dynamic debug feature for the module:
-
-```shell
-echo "module umbra_wg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
+```sh
+UWG_SOURCE=/path/to/tool UWG_LEGACY_FAMILY=<legacy-family> \
+    ./scripts/dev/make-uwg.sh
 ```
 
-This will log messages to dmesg, which can be watched live with:
-```shell
+## Быстрый старт
+
+```sh
+sudo ip link add uwg0 type umbrawg
+uwg genkey > private.key
+uwg set uwg0 private-key private.key listen-port 51820
+uwg set uwg0 peer "$(cat peer-public.key)" \
+    allowed-ips 10.0.0.2/32 endpoint 203.0.113.5:51820
+sudo ip addr add 10.0.0.1/24 dev uwg0
+sudo ip link set uwg0 up
+```
+
+## Параметры конфигурации
+
+Все параметры, кроме `Jc`, `Jmin` и `Jmax`, должны совпадать на обеих
+сторонах.
+
+- `Jc` — количество junk-пакетов, `1..128` (рекомендуется `4..12`);
+- `Jmin`/`Jmax` — размер junk-пакетов, `Jmin < Jmax`, рекомендуется `8..80`;
+- `S1` — padding инициирующего пакета, `S1 ≤ 1132`;
+- `S2` — padding ответа, `S2 ≤ 1188`; `S1 + 56 ≠ S2`;
+- `S3` — padding cookie-пакета;
+- `S4` — padding транспортных пакетов;
+- `H1..H4` — типы сообщений, должны быть уникальны;
+- `I1..I5` — шаблоны junk-пакетов перед handshake;
+- `header-protection-key` — 32-байтный ключ защиты заголовков;
+- `content-padding-addition` — дополнительный padding полезной нагрузки;
+- `random-trailers` — случайные хвосты пакетов;
+- `disable-cookies` — отключить cookie-механизм.
+
+При включённой защите заголовков `S1..S4` должны быть не меньше `12`.
+Максимальные значения `S1/S2` рассчитаны для MTU 1280.
+
+## Тестирование
+
+Тесты запускаются только в изолированных network namespace; хост-сеть не
+затрагивается. Рекомендуемый способ — QEMU/KVM через `virtme-ng`:
+
+```sh
+sudo ./scripts/dev/smoke.sh
+sudo vng --run --force-9p --cpus 12 --memory 3G -- \
+    ./scripts/bench/bench.sh umbrawg 0 tcp1420 10 3
+sudo vng --run --force-9p --cpus 12 --memory 3G -- \
+    env FLOWS=12 ./scripts/bench/bench.sh umbrawg 0-11 tcp1420 10 3
+```
+
+Подробности: [`scripts/bench/README.md`](scripts/bench/README.md).
+
+## Архитектура
+
+Описание слоёв, модели конкурентности и использованных возможностей ядра
+7.3 — в [`docs/architecture.md`](docs/architecture.md).
+
+## Диагностика
+
+Динамическая отладка:
+
+```sh
+echo "module umbrawg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
 dmesg -wT
 ```
 
-### Low space on `/tmp` filesystem
+Если модуль не загружается, проверьте, что загружены зависимости:
 
-Most installation instructions above assume that you have enough space in system's `/tmp` partition (as setup script needs 
-to manipulate with kernel's sourcetree which is pretty huge).
-
-If you can not afford enough space in your `/tmp`, you may override temporary dir by setting `AWG_TEMP_DIR` environment variable
-before the installation:
-
-```shell
-export AWG_TEMP_DIR="/home/ubuntu/tmp"
+```sh
+modinfo -F depends umbrawg.ko
 ```
 
-This setting should persist for future and will not require repeating.
+## Миграция
 
-### Kernel sourcetree could not be found automatically
+Netlink-семейство и rtnl-kind переименованы в `umbrawg`. Скрипты и
+конфигурации, которые использовали прежнее имя, нужно обновить. Wire-формат
+не менялся, поэтому совместимость на уровне протокола сохраняется.
 
-Kernel 7.3+ builds use only the installed headers; a kernel source tree is no
-longer required. If a distribution ships incomplete headers, install the
-matching `linux-headers` package for the running kernel.
+## Лицензия и авторы
 
-## License
+Проект распространяется по лицензии [GPLv2](COPYING).
 
-This project is released under the [GPLv2](COPYING).
+Авторы оригинала: Jason A. Donenfeld, AmneziaVPN. Форк и переработка:
+ivlev-dev.

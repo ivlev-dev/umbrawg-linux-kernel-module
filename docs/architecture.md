@@ -3,37 +3,39 @@
 Модуль собран из одного кодового пути под Linux 7.3+. Наследие
 (`src/compat`, `src/crypto/zinc`, старые arch-конфиги) удалено.
 
-## Идентичность сборки
-
-Имя модуля и все видимые из userspace строки задаются одним параметром:
+## Идентичность
 
 ```sh
-make                        # umbra-wg.ko, genetlink "umbra-wg", rtnl "umbra-wg"
-make AWG_NAME=amneziawg     # amneziawg.ko, совместимые genetlink/rtnl "amneziawg"
+make                    # umbrawg.ko, genetlink "umbrawg", rtnl "umbrawg"
+make UWG_NAME=umbrawg   # явное указание имени
 ```
 
-`src/awg_identity.h` — единственная точка, где определяется `AWG_NAME`.
-Релизная сборка совместима по netlink и wire-формату с `amneziawg`.
+`src/uwg_identity.h` — единственная точка, где определяется `UWG_NAME`.
+Wire-формат не зависит от имени: netlink/rtnl переименованы, протокол
+остался прежним.
 
-## Слои
+## Слои (целевая структура)
 
 ```
-netdev/awg_netdev.c   netdev lifecycle, ndo_start_xmit, NAPI
-datapath/awg_tx.c     TX: route -> keypair -> encrypt -> udp xmit
-datapath/awg_rx.c     RX: parse -> keypair -> decrypt -> GRO
-crypto/awg_aead.c     chacha20poly1305 / blake2s
-noise/awg_noise.c     Noise IK, keypairs, replay window
-obfs/awg_obfs.c       padding, junk, header protection
-net/awg_socket.c      udp_tunnel, endpoint, dst_cache
-ctrl/awg_netlink.c    genetlink ABI (frozen)
-ctrl/awg_timers.c     timers, coalescing
+netdev/uwg_netdev.c   netdev lifecycle, ndo_start_xmit, NAPI
+datapath/uwg_tx.c     TX: route -> keypair -> encrypt -> udp xmit
+datapath/uwg_rx.c     RX: parse -> keypair -> decrypt -> GRO
+crypto/uwg_aead.c     chacha20poly1305 / blake2s
+noise/uwg_noise.c     Noise IK, keypairs, replay window
+obfs/uwg_obfs.c       padding, junk, header protection
+net/uwg_socket.c      udp_tunnel, endpoint, dst_cache
+ctrl/uwg_netlink.c    genetlink ABI
+ctrl/uwg_timers.c     timers, coalescing
 peers/                peer lifecycle, allowedips, lookup
 ```
+
+Сейчас код остаётся в плоском `src/`; структура выше — направление
+дальнейшей декомпозиции.
 
 ## Конкурентность
 
 - В датапасе нет sleepable-локов и глобальных cacheline-записей.
-- Ключ header protection — `RCU`-снапшот (`struct awg_hp_key __rcu *`);
+- Ключ header protection — RCU-снапшот (`struct uwg_hp_key __rcu *`);
   запись только из netlink под `update_lock`, чтение без локов.
 - Endpoint пира — `seqlock`: читатель копирует структуру, писатель
   обновляет её редко.
@@ -69,10 +71,10 @@ peers/                peer lifecycle, allowedips, lookup
 
 Гейты (TCP, 1420B, VM 12 vCPU):
 
-| Сценарий | amneziawg | umbra-wg | Прирост |
+| Сценарий | Базовая версия | umbrawg | Прирост |
 |---|---|---|---|
 | 1 поток, 1 CPU | 2.22 Гбит/с | 3.47 Гбит/с | +56% |
 | 12 потоков, 12 CPU | 2.14 Гбит/с | 9.16 Гбит/с | +329% |
 
 С обфускацией (Jc/Jmin/Jmax, S1–S4, H1–H4, header protection) и 12 потоками:
-6.2 Гбит/с; interop old<->new проверен в обе стороны.
+6.2 Гбит/с.
