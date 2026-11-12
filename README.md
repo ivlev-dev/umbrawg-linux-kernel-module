@@ -101,11 +101,16 @@ sudo ip link set uwg0 up
 
 ```sh
 sudo ./scripts/dev/smoke.sh
-sudo vng --run --force-9p --cpus 12 --memory 3G -- \
-    ./scripts/bench/bench.sh umbrawg 0 tcp1420 10 3
-sudo vng --run --force-9p --cpus 12 --memory 3G -- \
-    env FLOWS=12 ./scripts/bench/bench.sh umbrawg 0-11 tcp1420 10 3
+sudo ./scripts/bench/vm.sh vng --run --force-9p --cpus 4 --pin 8-11 --memory 3G -- \
+    ./scripts/bench/bench.sh umbrawg 0 tcp1420 8 3
+sudo ./scripts/bench/vm.sh vng --run --force-9p --cpus 4 --pin 8-11 --memory 3G -- \
+    env FLOWS=4 ./scripts/bench/bench.sh umbrawg 0-3 udp1340 8 3
 ```
+
+`scripts/bench/vm.sh` резервирует ядра хоста через cgroup v2
+(`cpuset.cpus.partition=isolated`), поэтому планировщик не размещает на них
+посторонние задачи, и замеры не зависят от фоновой нагрузки. Раздел
+создаётся на время прогона и удаляется после.
 
 Подробности: [`scripts/bench/README.md`](scripts/bench/README.md).
 

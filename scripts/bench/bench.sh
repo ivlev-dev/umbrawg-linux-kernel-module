@@ -25,6 +25,7 @@ UWG_DEV_OPTS=${UWG_DEV_OPTS:-}
 UWG_HP_KEY=${UWG_HP_KEY:-}
 UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
+UWG_UDP_BITRATE=${UWG_UDP_BITRATE:-0}
 
 if [ "$MODE" = umbrawg ]; then
 	TOOL="$ROOT/scripts/dev/uwg"
@@ -162,6 +163,7 @@ while [ "$rep" -le "$REPS" ]; do
 
 	idle0=$(cpu_idle)
 	total0=$(cpu_total)
+	loss=0
 
 	case "$CASE" in
 	tcp1420)
@@ -176,9 +178,16 @@ while [ "$rep" -le "$REPS" ]; do
 		udp1340) len=1340 ;;
 		*) len=64 ;;
 		esac
+		RATE="-b 0"
+		if [ "$UWG_UDP_BITRATE" != 0 ]; then
+			per=$(awk -v r="$UWG_UDP_BITRATE" -v f="$FLOWS" \
+				'BEGIN { printf "%.0f", r / f }')
+			RATE="-b ${per}M"
+		fi
 		ip netns exec "$N1" taskset -c "$CPU" iperf3 -c 192.168.199.2 \
-			-p 5301 $PAR -u -b 0 -l "$len" -t "$DUR" -O 2 -J >"$TMP/out.json"
+			-p 5301 $PAR -u $RATE -l "$len" -t "$DUR" -O 2 -J >"$TMP/out.json"
 		bps=$(jq -r '.end.sum.bits_per_second' "$TMP/out.json")
+		loss=$(jq -r '.end.sum.lost_percent // 0' "$TMP/out.json")
 		;;
 	*)
 		echo "unknown case: $CASE" >&2
@@ -195,13 +204,13 @@ while [ "$rep" -le "$REPS" ]; do
 	pps=$(awk -v b="$bps" -v l="$len" 'BEGIN { printf "%.0f", b / (l * 8) }')
 	busy=$(awk -v i0="$idle0" -v i1="$idle1" -v t0="$total0" -v t1="$total1" \
 		'BEGIN { d = t1 - t0; printf "%.1f", (d > 0 ? 100 * (1 - (i1 - i0) / d) : 0) }')
-	echo "$rep $bps $pps $busy" >>"$RESULT"
+	echo "$rep $bps $pps $busy $loss" >>"$RESULT"
 	rep=$((rep + 1))
 	sleep 0.3
 done
 
 awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '
-{ b[NR] = $2; p[NR] = $3; u[NR] = $4 }
+{ b[NR] = $2; p[NR] = $3; u[NR] = $4; l[NR] = $5 }
 END {
 	n = NR
 	for (i = 1; i <= n; i++)
@@ -210,7 +219,8 @@ END {
 				t = b[i]; b[i] = b[j]; b[j] = t
 				t = p[i]; p[i] = p[j]; p[j] = t
 				t = u[i]; u[i] = u[j]; u[j] = t
+				t = l[i]; l[i] = l[j]; l[j] = t
 			}
 	m = int((n + 1) / 2)
-	printf "%s\t%s\t%s\t%.3f\t%.0f\t%.1f\n", mode, cname, cpu, b[m] / 1e9, p[m], u[m]
+	printf "%s\t%s\t%s\t%.3f\t%.0f\t%.1f\tlost %.2f%%\n", mode, cname, cpu, b[m] / 1e9, p[m], u[m], l[m]
 }' "$RESULT"
