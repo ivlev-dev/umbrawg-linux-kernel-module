@@ -34,8 +34,12 @@ else
 	export UWG_MODULE="$TARGET"
 fi
 
-UWG_LABEL=profile FLOWS="$FLOWS" \
-	"$DIR/bench.sh" "$MODE" "$CPU" "$CASE" "$DUR" 1 >"$LOG" 2>&1 &
+if [ "$CASE" = udp-split ]; then
+	"$DIR/udp-split.sh" "$MODE" "$CPU" "$FLOWS" "$DUR" 1 >"$LOG" 2>&1 &
+else
+	UWG_LABEL=profile FLOWS="$FLOWS" \
+		"$DIR/bench.sh" "$MODE" "$CPU" "$CASE" "$DUR" 1 >"$LOG" 2>&1 &
+fi
 BPID=$!
 
 (i=0; while [ "$i" -lt 150 ]; do

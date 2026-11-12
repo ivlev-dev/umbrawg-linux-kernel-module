@@ -164,6 +164,7 @@ static inline void wg_prev_queue_drop_peeked(struct prev_queue *queue)
 #define WG_CRYPT_BATCH 32
 
 extern unsigned int wg_poll_iters;
+extern unsigned int wg_poll_all;
 
 #define WG_WORK_KICKED 0
 
@@ -238,7 +239,7 @@ static inline bool wg_crypt_queue_poll(struct crypt_queue *queue)
 {
 	unsigned int i, iters;
 
-	if (!READ_ONCE(queue->poll))
+	if (!READ_ONCE(queue->poll) && !READ_ONCE(wg_poll_all))
 		return false;
 	iters = READ_ONCE(wg_poll_iters);
 
@@ -308,7 +309,8 @@ static inline bool wg_peer_tx_poll(struct wg_peer *peer)
 {
 	unsigned int i, iters;
 
-	if (!READ_ONCE(peer->device->encrypt_queue.poll))
+	if (!READ_ONCE(peer->device->encrypt_queue.poll) &&
+	    !READ_ONCE(wg_poll_all))
 		return false;
 	iters = READ_ONCE(wg_poll_iters);
 	for (i = 0; i < iters; ++i) {

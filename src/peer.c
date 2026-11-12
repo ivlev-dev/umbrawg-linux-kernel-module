@@ -27,6 +27,10 @@ unsigned int wg_poll_iters __read_mostly = 512;
 module_param_named(poll_iters, wg_poll_iters, uint, 0644);
 MODULE_PARM_DESC(poll_iters, "crypt worker adaptive spin iterations");
 
+unsigned int wg_poll_all __read_mostly;
+module_param_named(poll_all, wg_poll_all, uint, 0644);
+MODULE_PARM_DESC(poll_all, "poll crypt workers even with parallel senders");
+
 struct wg_peer *wg_peer_create(struct wg_device *wg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN])
