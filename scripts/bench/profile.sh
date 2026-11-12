@@ -17,7 +17,7 @@ CPU=${2:?cpu}
 CASE=${3:?case}
 FLOWS=${4:?flows}
 DUR=${5:-8}
-PROFILE_CPU=${PROFILE_CPU:-}
+PROFILE_CPU=${PROFILE_CPU:-0-3}
 PROFILE_SYM=${PROFILE_SYM:-umbrawg}
 
 LOG=/tmp/bench-profile.log
@@ -62,6 +62,9 @@ echo '=== top children ==='
 perf report -i "$DATA" --kallsyms="$KALL" --stdio --percent-limit 2 \
 	--sort symbol 2>/dev/null \
 	| grep -E '^ +[0-9]+\.[0-9]+%' | head -30
+echo '=== flat (dso,symbol) ==='
+perf report -i "$DATA" --kallsyms="$KALL" --stdio --percent-limit 0.4 \
+	--sort dso,symbol 2>/dev/null | grep -E '^ +[0-9]+\.[0-9]+%' | head -25
 echo '=== spinlock callers ==='
 perf report -i "$DATA" --kallsyms="$KALL" --stdio -g graph,0.5,caller \
 	-q --percent-limit 0.4 2>/dev/null \
