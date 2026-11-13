@@ -44,9 +44,15 @@ sudo ./scripts/bench/vm.sh vng --run --force-9p --cpus 4 --pin 8-11 --memory 3G 
 ```sh
 # перемежающееся A/B двух .ko
 ./scripts/bench/ab.sh old ./src/old.ko new ./src/new.ko tcp1420 0 1 8 2 2
-# сравнение с внешней сборкой (amneziawg)
+# Сравнение с внешней сборкой (amneziawg)
 UWG_REF_TOOL=/usr/bin/awg UWG_REF_KIND=amneziawg UWG_REF_MODULE=amneziawg \
     ./scripts/bench/compare.sh tcp1420 0 1 8 2 3
+# Все реализации интерливом: amneziawg, umb-none, umb-bbr, umb-brutal,
+# umb-bbr-fec, hy-bbr, hy-brutal
+UWG_REF_TOOL=/usr/bin/awg UWG_REF_KIND=amneziawg UWG_REF_MODULE=amneziawg \
+    ./scripts/bench/suite.sh tcp1420 3 2 2
+env VARIANTS="umb-none umb-bbr hy-bbr" UWG_NETEM="loss 5%" \
+    ./scripts/bench/suite.sh udp1340 3 2 2
 # матрица 4 сценария x профили (default/obfs)
 UWG_REF_TOOL=/usr/bin/awg UWG_REF_KIND=amneziawg UWG_REF_MODULE=amneziawg \
     ./scripts/bench/matrix4.sh 2
@@ -115,3 +121,29 @@ sudo vng --run --force-9p --cpus 12 --pin 0-11 --memory 3G -- \
 ## Контроль
 
 `scripts/bench/plain.sh` — та же топология без туннеля (потолок veth).
+
+## Hysteria 2
+
+`scripts/bench/hysteria.sh` поднимает сервер и клиент Hysteria 2 в тех же
+двух namespace, клиент отдаёт endpoint сервера через `tcpForwarding` /
+`udpForwarding`, так что iperf3 не знает о туннеле и замер сопоставим с
+`bench.sh`.
+
+```sh
+# BBR (без bandwidth в конфиге)
+./scripts/bench/hysteria.sh 0 tcp1420 4 3
+# brutal: задаётся полоса, включается компенсация потерь
+env HY_CC=brutal HY_BW="1 gbps" ./scripts/bench/hysteria.sh 0 udp1340 4 3
+# с потерями на veth
+env HY_CC=bbr UWG_NETEM="loss 5%" ./scripts/bench/hysteria.sh 0 tcp1420 4 3
+```
+
+Вывод: те же колонки плюс `rss` — суммарный RSS сервера и клиента.
+У ядерного модуля в колонке `mem` — размер из `/proc/modules` (ядро модуля
+без slab на peer'ах), поэтому это разные величины, но обе показывают
+порядок потребления.
+
+В Hysteria 2 **нет FEC**: он был в Hysteria 1 и удалён во второй версии.
+`brutal` там — фиксированный шейпер с компенсацией потерь (`ackRate`),
+`bbr` — реализация из quic-go. Наши `brutal` и `bbr` повторяют их
+поведение (см. `docs/protocol.md`, раздел 5).

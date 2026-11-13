@@ -25,3 +25,4 @@ scripts/dev/uwg
 .cache
 compile_commands.json
 .clangd
+hysteria/
