@@ -12,6 +12,7 @@
 #include "cookie.h"
 #include "socket.h"
 #include "type.h"
+#include "frame.h"
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -473,6 +474,22 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 
 	wg_timers_any_authenticated_packet_received(peer);
 	wg_timers_any_authenticated_packet_traversal(peer);
+
+	if (static_branch_unlikely(&uwg_cc_bbr_active) && likely(p)) {
+		if (unlikely(*p == UWG_FRAME_MAGIC && skb->len >= 2)) {
+			u8 kind;
+
+			if (skb_copy_bits(skb, 1, &kind, 1) == 0 && kind &&
+			    uwg_cc_fb_rx(peer, skb, kind,
+					 PACKET_CB(skb)->nonce))
+				goto packet_processed;
+		} else if (likely(*p)) {
+			uwg_cc_fb_account(peer, skb,
+					  PACKET_CB(skb)->padding +
+					  MESSAGE_MINIMUM_LENGTH + skb->len,
+					  PACKET_CB(skb)->nonce);
+		}
+	}
 
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet

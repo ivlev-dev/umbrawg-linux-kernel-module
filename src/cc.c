@@ -17,6 +17,7 @@
 #include <linux/unaligned.h>
 
 DEFINE_STATIC_KEY_FALSE(uwg_cc_active);
+DEFINE_STATIC_KEY_FALSE(uwg_cc_bbr_active);
 
 static unsigned int uwg_cc_burst_ms __read_mostly = 10;
 module_param_named(cc_burst_ms, uwg_cc_burst_ms, uint, 0644);
@@ -89,6 +90,7 @@ static u64 uwg_cc_cap_bytes(const struct wg_peer *peer)
 
 	cap = mul_u64_u64_div_u64(rate, (u64)uwg_cc_burst_ms * NSEC_PER_MSEC,
 				  8 * NSEC_PER_SEC);
+	cap = min_t(u64, cap, UWG_CC_MAX_CAP_BYTES);
 	return max_t(u64, cap, UWG_CC_MIN_CAP_BYTES);
 }
 
@@ -107,10 +109,10 @@ static void uwg_cc_refill(struct wg_peer *peer, ktime_t now)
 	dt = ktime_to_ns(ktime_sub(now, cc->last));
 	cc->last = now;
 	if (dt)
-		cc->tokens = min_t(u64, cc->tokens +
-					   mul_u64_u64_div_u64(rate, dt,
-							       8 * NSEC_PER_SEC),
-				   uwg_cc_cap_bytes(peer));
+		cc->tokens = min_t(s64, cc->tokens +
+					   (s64)mul_u64_u64_div_u64(rate, dt,
+							    8 * NSEC_PER_SEC),
+				   (s64)uwg_cc_cap_bytes(peer));
 }
 
 static unsigned int uwg_cc_bucket_index(const struct sk_buff *skb)
@@ -160,7 +162,7 @@ static void uwg_cc_arm_locked(struct wg_peer *peer, u64 need_bytes)
 
 	delay_ns = mul_u64_u64_div_u64(max_t(u64, need_bytes, 1),
 				       8 * NSEC_PER_SEC, rate);
-	delay_ns = clamp_t(u64, delay_ns, 1,
+	delay_ns = clamp_t(u64, delay_ns, UWG_CC_TIMER_MIN_NS,
 			   (u64)uwg_cc_burst_ms * 2 * NSEC_PER_MSEC);
 	cc->armed = true;
 	hrtimer_start(&cc->timer, ns_to_ktime(delay_ns),
@@ -189,23 +191,29 @@ static enum hrtimer_restart uwg_cc_timer(struct hrtimer *timer)
 	uwg_cc_refill(peer, ktime_get());
 	for (i = 0; i < UWG_CC_TIMER_BUDGET; ++i) {
 		skb = uwg_cc_peek_locked(cc);
-		if (!skb || cc->tokens < skb->len)
+		if (!skb)
+			break;
+		if (cc->tokens < (s64)skb->len &&
+		    (skb->len <= uwg_cc_cap_bytes(peer) || cc->tokens < 0))
 			break;
 		skb = uwg_cc_pop_locked(cc);
-		cc->tokens -= skb->len;
+		cc->tokens -= (s64)skb->len;
 		__skb_queue_tail(&tx, skb);
 	}
 
 	if (cc->busy) {
 		skb = uwg_cc_peek_locked(cc);
 		if (skb)
-			uwg_cc_arm_locked(peer, skb->len > cc->tokens ?
-							skb->len - cc->tokens : 1);
+			uwg_cc_arm_locked(peer, cc->tokens < (s64)skb->len ?
+						(s64)skb->len - cc->tokens : 1);
 	}
 	spin_unlock(&cc->lock);
 
-	while ((skb = __skb_dequeue(&tx)) != NULL)
+	while ((skb = __skb_dequeue(&tx)) != NULL) {
+		cc->sent_packets++;
+		cc->sent_bytes += skb->len;
 		wg_socket_send_skb_to_peer(peer, skb, PACKET_CB(skb)->ds);
+	}
 
 	wg_peer_put(peer);
 	return HRTIMER_NORESTART;
@@ -217,6 +225,7 @@ void uwg_cc_init(struct uwg_cc *cc)
 	spin_lock_init(&cc->lock);
 	hrtimer_setup(&cc->timer, uwg_cc_timer, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL_SOFT);
+	uwg_cc_fb_init(cc);
 	cc->last = ktime_get();
 }
 
@@ -234,6 +243,7 @@ void uwg_cc_purge(struct wg_peer *peer)
 	struct uwg_cc *cc = &peer->cc;
 
 	hrtimer_cancel(&cc->timer);
+	uwg_cc_fb_stop(peer);
 	spin_lock_bh(&cc->lock);
 	cc->armed = false;
 	uwg_cc_purge_locked(peer);
@@ -248,10 +258,12 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 
 	if (mode > UWG_CC_BBR)
 		return -EINVAL;
-	if (mode == UWG_CC_BBR)
-		return -EOPNOTSUPP;
-	if (mode != UWG_CC_NONE && !rate_bps)
-		return -EINVAL;
+	if (mode != UWG_CC_NONE && !rate_bps) {
+		if (mode == UWG_CC_BBR)
+			rate_bps = UWG_BBR_MIN_RATE_BPS;
+		else
+			return -EINVAL;
+	}
 
 	if (mode != UWG_CC_NONE) {
 		buckets = kcalloc(UWG_CC_BUCKETS, sizeof(*buckets), GFP_KERNEL);
@@ -262,6 +274,8 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 	}
 
 	hrtimer_cancel(&cc->timer);
+	if (old == UWG_CC_BBR && mode != UWG_CC_BBR)
+		uwg_cc_fb_stop(peer);
 	spin_lock_bh(&cc->lock);
 	cc->armed = false;
 	uwg_cc_purge_locked(peer);
@@ -272,14 +286,33 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 	cc->cursor = 0;
 	cc->tokens = 0;
 	cc->last = ktime_get();
-	WRITE_ONCE(cc->rate_bps, mode == UWG_CC_NONE ? 0 : rate_bps);
 	WRITE_ONCE(cc->mode, mode);
+	if (mode == UWG_CC_BBR) {
+		cc->sent_packets = 0;
+		cc->sent_bytes = 0;
+		cc->dropped_packets = 0;
+		cc->fb.rx_bytes = 0;
+		cc->fb.rx_packets = 0;
+		cc->fb.rx_highest = 0;
+		uwg_cc_bbr_reset(cc, rate_bps);
+		WRITE_ONCE(cc->rate_bps, cc->bbr.pacing_bps);
+	} else {
+		WRITE_ONCE(cc->rate_bps, mode == UWG_CC_NONE ? 0 : rate_bps);
+	}
 	spin_unlock_bh(&cc->lock);
+
+	if (mode == UWG_CC_BBR)
+		uwg_cc_fb_start(peer);
 
 	if (old == UWG_CC_NONE && mode != UWG_CC_NONE)
 		static_branch_inc(&uwg_cc_active);
 	else if (old != UWG_CC_NONE && mode == UWG_CC_NONE)
 		static_branch_dec(&uwg_cc_active);
+
+	if (mode == UWG_CC_BBR && old != UWG_CC_BBR)
+		static_branch_inc(&uwg_cc_bbr_active);
+	else if (mode != UWG_CC_BBR && old == UWG_CC_BBR)
+		static_branch_dec(&uwg_cc_bbr_active);
 
 	return 0;
 }
@@ -287,9 +320,10 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 void uwg_cc_clear(struct wg_peer *peer)
 {
 	struct uwg_cc *cc = &peer->cc;
-	bool was_active = READ_ONCE(cc->mode) != UWG_CC_NONE;
+	enum uwg_cc_mode old = READ_ONCE(cc->mode);
 
 	hrtimer_try_to_cancel(&cc->timer);
+	uwg_cc_fb_stop(peer);
 	spin_lock_bh(&cc->lock);
 	cc->armed = false;
 	WRITE_ONCE(cc->mode, UWG_CC_NONE);
@@ -299,8 +333,10 @@ void uwg_cc_clear(struct wg_peer *peer)
 	cc->buckets = NULL;
 	spin_unlock_bh(&cc->lock);
 
-	if (was_active)
+	if (old != UWG_CC_NONE)
 		static_branch_dec(&uwg_cc_active);
+	if (old == UWG_CC_BBR)
+		static_branch_dec(&uwg_cc_bbr_active);
 }
 
 bool uwg_cc_tx(struct wg_peer *peer, struct sk_buff *skb)
@@ -310,13 +346,23 @@ bool uwg_cc_tx(struct wg_peer *peer, struct sk_buff *skb)
 	unsigned int idx;
 
 	spin_lock_bh(&cc->lock);
+	if (unlikely(PACKET_CB(skb)->is_service)) {
+		spin_unlock_bh(&cc->lock);
+		wg_socket_send_skb_to_peer(peer, skb, PACKET_CB(skb)->ds);
+		return true;
+	}
 	uwg_cc_refill(peer, ktime_get());
 
-	if (!cc->qlen && cc->tokens >= skb->len) {
-		cc->tokens -= skb->len;
+	if (unlikely(READ_ONCE(cc->mode) == UWG_CC_BBR))
+		uwg_cc_fb_kick_locked(peer);
+
+	if (!cc->qlen && (cc->tokens >= (s64)skb->len ||
+			 (skb->len > uwg_cc_cap_bytes(peer) && cc->tokens >= 0))) {
+		cc->tokens -= (s64)skb->len;
 		send_now = true;
 	} else if (cc->qlen >= UWG_CC_MAX_QUEUED) {
 		spin_unlock_bh(&cc->lock);
+		cc->dropped_packets++;
 		DEV_STATS_INC(peer->device->dev, tx_dropped);
 		kfree_skb(skb);
 		return true;
@@ -325,13 +371,16 @@ bool uwg_cc_tx(struct wg_peer *peer, struct sk_buff *skb)
 		__skb_queue_tail(&cc->buckets[idx].queue, skb);
 		cc->busy |= BIT(idx);
 		cc->qlen++;
-		uwg_cc_arm_locked(peer, skb->len > cc->tokens ?
-						skb->len - cc->tokens : 1);
+		uwg_cc_arm_locked(peer, cc->tokens < (s64)skb->len ?
+					(s64)skb->len - cc->tokens : 1);
 	}
 	spin_unlock_bh(&cc->lock);
 
-	if (send_now)
+	if (send_now) {
+		cc->sent_packets++;
+		cc->sent_bytes += skb->len;
 		wg_socket_send_skb_to_peer(peer, skb, PACKET_CB(skb)->ds);
+	}
 
 	return true;
 }
@@ -414,10 +463,31 @@ static int uwg_cc_show(struct seq_file *seq, void *offset)
 	seq_printf(seq, "netns %u\n", dev_net(dev)->ns.inum);
 
 	mutex_lock(&wg->device_update_lock);
-	list_for_each_entry(peer, &wg->peer_list, peer_list)
+	list_for_each_entry(peer, &wg->peer_list, peer_list) {
+		struct uwg_cc *cc = &peer->cc;
+
 		seq_printf(seq, "peer %llu %s %llu\n", peer->internal_id,
-			   uwg_cc_mode_name(READ_ONCE(peer->cc.mode)),
-			   div_u64(READ_ONCE(peer->cc.rate_bps), 1000ULL * 1000ULL));
+			   uwg_cc_mode_name(READ_ONCE(cc->mode)),
+			   div_u64(READ_ONCE(cc->rate_bps), 1000ULL * 1000ULL));
+		if (READ_ONCE(cc->mode) != UWG_CC_BBR)
+			continue;
+		seq_printf(seq,
+			   "  bbr: phase=%s pace_bps=%llu bw_bps=%llu full_bw_bps=%llu loss=%u%% min_rtt_us=%llu rtt_us=%llu req=%lld/%lld fb=%lld/%lld rx=%llu/%llu qlen=%u\n",
+			   uwg_cc_phase_name(cc->bbr.phase),
+			   cc->bbr.pacing_bps, cc->bbr.bw_max_bps,
+			   cc->bbr.full_bw_bps, cc->bbr.loss_pct,
+			   div_u64(cc->bbr.min_rtt_ns, 1000),
+			   div_u64(cc->bbr.last_rtt_ns, 1000),
+			   atomic64_read(&cc->fb.requests_sent),
+			   atomic64_read(&cc->fb.requests_rx),
+			   atomic64_read(&cc->fb.feedback_sent),
+			   atomic64_read(&cc->fb.feedback_rx),
+			   cc->fb.rx_bytes, cc->fb.rx_packets,
+			   READ_ONCE(cc->qlen));
+		seq_printf(seq, "  pacer: sent=%llu/%llu drop=%llu tokens=%lld\n",
+			   cc->sent_packets, cc->sent_bytes,
+			   cc->dropped_packets, cc->tokens);
+	}
 	mutex_unlock(&wg->device_update_lock);
 	return 0;
 }

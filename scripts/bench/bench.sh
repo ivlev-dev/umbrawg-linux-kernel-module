@@ -54,8 +54,10 @@ N2="uwb-$$-2"
 TMP=$(mktemp -d)
 LOADED=0
 SPID=
+TRACE_PID=
 
 cleanup() {
+	[ -n "$TRACE_PID" ] && kill "$TRACE_PID" 2>/dev/null || true
 	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null || true
 	ip netns del "$N1" 2>/dev/null || true
 	ip netns del "$N2" 2>/dev/null || true
@@ -151,7 +153,11 @@ cc_file() {
 }
 
 if [ -n "$UWG_NETEM" ]; then
-	ip netns exec "$N1" tc qdisc add dev uwv0 root netem loss "$UWG_NETEM"
+	case "$UWG_NETEM" in
+	*" "*) set -- $UWG_NETEM ;;
+	*) set -- loss "$UWG_NETEM" ;;
+	esac
+	ip netns exec "$N1" tc qdisc add dev uwv0 root netem "$@"
 fi
 
 if [ -n "$UWG_CC" ]; then
@@ -191,6 +197,20 @@ while [ "$rep" -le "$REPS" ]; do
 	total0=$(cpu_total)
 	loss=0
 
+	if [ -n "${UWG_TRACE:-}" ]; then
+		f1=$(cc_file "$N1" || true)
+		f2=$(cc_file "$N2" || true)
+		if [ -n "$f1" ] || [ -n "$f2" ]; then
+			( while :; do
+				printf '@ %s\n' "$(date +%s.%N)"
+				[ -n "$f1" ] && { printf '[N1]\n'; cat "$f1"; }
+				[ -n "$f2" ] && { printf '[N2]\n'; cat "$f2"; }
+				sleep 0.5
+			  done ) >>"$TMP/trace" &
+			TRACE_PID=$!
+		fi
+	fi
+
 	case "$CASE" in
 	tcp1420)
 		ip netns exec "$N1" taskset -c "$CPU" iperf3 -c 192.168.199.2 \
@@ -226,6 +246,8 @@ while [ "$rep" -le "$REPS" ]; do
 
 	wait "$SPID" 2>/dev/null || true
 	SPID=
+	[ -n "$TRACE_PID" ] && kill "$TRACE_PID" 2>/dev/null || true
+	TRACE_PID=
 
 	pps=$(awk -v b="$bps" -v l="$len" 'BEGIN { printf "%.0f", b / (l * 8) }')
 	busy=$(awk -v i0="$idle0" -v i1="$idle1" -v t0="$total0" -v t1="$total1" \
@@ -234,6 +256,10 @@ while [ "$rep" -le "$REPS" ]; do
 	rep=$((rep + 1))
 	sleep 0.3
 done
+
+if [ -n "${UWG_TRACE:-}" ] && [ -s "$TMP/trace" ]; then
+	cat "$TMP/trace"
+fi
 
 if [ -n "${UWG_STATS:-}" ]; then
 	ip netns exec "$N1" "$TOOL" show uw0 | sed -n '/peer/,/^$/p' | head -12

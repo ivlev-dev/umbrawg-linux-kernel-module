@@ -243,7 +243,8 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	/* Force hash calculation before encryption so that flow analysis is
 	 * consistent over the inner packet.
 	 */
-	skb_get_hash(skb);
+	if (likely(!PACKET_CB(skb)->is_service))
+		skb_get_hash(skb);
 
 	/* Calculate lengths. */
 	packet_len = skb->len + MESSAGE_MINIMUM_LENGTH + padding;
@@ -534,9 +535,14 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 		/* 0 for no outer TOS: no leak. TODO: at some later point, we
 		 * might consider using flowi->tos as outer instead.
 		 */
-		PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
-		if (static_branch_unlikely(&uwg_cc_active))
-			PACKET_CB(skb)->flow_hash = uwg_cc_flow_hash(skb);
+		if (unlikely(PACKET_CB(skb)->is_service)) {
+			PACKET_CB(skb)->ds = 0;
+			PACKET_CB(skb)->flow_hash = 0;
+		} else {
+			PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
+			if (static_branch_unlikely(&uwg_cc_active))
+				PACKET_CB(skb)->flow_hash = uwg_cc_flow_hash(skb);
+		}
 		PACKET_CB(skb)->nonce =
 				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))

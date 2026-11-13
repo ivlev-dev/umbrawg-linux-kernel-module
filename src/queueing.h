@@ -70,6 +70,7 @@ struct packet_cb {
 	u32 flow_hash;
 	bool is_keepalive;
 	bool parallel;
+	bool is_service;
 };
 
 #define PACKET_CB(skb) ((struct packet_cb *)((skb)->cb))
