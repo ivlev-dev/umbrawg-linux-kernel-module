@@ -172,7 +172,7 @@ void uwg_cc_bbr_tick(struct uwg_cc *cc, u64 now)
 			if (b->bw_max_bps >= b->safe_bw_bps * 11 / 10) {
 				b->safe_bw_bps = b->bw_max_bps;
 				b->slow_cnt = 0;
-			} else if (++b->slow_cnt >= 3) {
+			} else if (++b->slow_cnt >= 5) {
 				saturated = true;
 			}
 		}
@@ -217,7 +217,7 @@ void uwg_cc_bbr_tick(struct uwg_cc *cc, u64 now)
 						UWG_BBR_MIN_RATE_BPS);
 			else if (b->full_bw_bps < UWG_BBR_MAX_RATE_BPS)
 				b->full_bw_bps += min_t(u64,
-						b->full_bw_bps / 20 + 1000,
+						b->full_bw_bps / 4 + 1000,
 						UWG_BBR_MAX_RATE_BPS -
 						b->full_bw_bps);
 		}
