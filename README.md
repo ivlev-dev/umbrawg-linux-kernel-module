@@ -168,6 +168,10 @@ sudo ./scripts/bench/vm.sh vng --run --force-9p --cpus 4 --pin 8-11 --memory 3G 
 Описание слоёв, модели конкурентности и использованных возможностей ядра
 7.3 — в [`docs/architecture.md`](docs/architecture.md).
 
+Протокол дополнительного слоя (FEC, обратная связь, контроллеры скорости) —
+в [`docs/protocol.md`](docs/protocol.md); карта изменений при переходе с
+AmneziaWG — в [`docs/migration.md`](docs/migration.md).
+
 ## Диагностика
 
 Динамическая отладка:
