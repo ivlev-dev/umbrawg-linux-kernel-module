@@ -26,6 +26,7 @@ UWG_HP_KEY=${UWG_HP_KEY:-}
 UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
 UWG_CC=${UWG_CC:-}
+UWG_NETEM=${UWG_NETEM:-}
 UWG_UDP_BITRATE=${UWG_UDP_BITRATE:-0}
 
 if [ "$MODE" = umbrawg ]; then
@@ -148,6 +149,10 @@ cc_file() {
 	done
 	return 1
 }
+
+if [ -n "$UWG_NETEM" ]; then
+	ip netns exec "$N1" tc qdisc add dev uwv0 root netem loss "$UWG_NETEM"
+fi
 
 if [ -n "$UWG_CC" ]; then
 	for ns in "$N1" "$N2"; do
