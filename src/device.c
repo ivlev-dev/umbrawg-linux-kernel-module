@@ -125,6 +125,7 @@ static int wg_stop(struct net_device *dev)
 	list_for_each_entry(peer, &wg->peer_list, peer_list) {
 		wg_packet_purge_staged_packets(peer);
 		uwg_cc_purge(peer);
+		uwg_tunnel_purge(peer);
 		wg_timers_stop(peer);
 		wg_noise_handshake_clear(&peer->handshake);
 		wg_noise_keypairs_clear(&peer->keypairs);
@@ -232,8 +233,8 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		skb_dst_drop(skb);
 
+		memset(PACKET_CB(skb), 0, sizeof(struct packet_cb));
 		PACKET_CB(skb)->mtu = mtu;
-		PACKET_CB(skb)->is_keepalive = false;
 
 		__skb_queue_tail(&packets, skb);
 	}

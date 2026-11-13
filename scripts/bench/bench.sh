@@ -26,6 +26,7 @@ UWG_HP_KEY=${UWG_HP_KEY:-}
 UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
 UWG_CC=${UWG_CC:-}
+UWG_FEC=${UWG_FEC:-}
 UWG_NETEM=${UWG_NETEM:-}
 UWG_UDP_BITRATE=${UWG_UDP_BITRATE:-0}
 
@@ -62,7 +63,7 @@ cleanup() {
 	ip netns del "$N1" 2>/dev/null || true
 	ip netns del "$N2" 2>/dev/null || true
 	rm -rf "$TMP"
-	[ "$LOADED" -eq 1 ] && rmmod "$MODULE" 2>/dev/null || true
+	[ "$LOADED" -eq 1 ] && [ -z "${UWG_KEEP_MODULE:-}" ] && rmmod "$MODULE" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -167,6 +168,13 @@ if [ -n "$UWG_CC" ]; then
 	done
 fi
 
+if [ -n "$UWG_FEC" ]; then
+	for ns in "$N1" "$N2"; do
+		f=$(cc_file "$ns" || true)
+		[ -n "$f" ] && printf 'all fec %s\n' "$UWG_FEC" >"$f"
+	done
+fi
+
 i=0
 while [ "$i" -lt 10 ]; do
 	ip netns exec "$N1" ping -c1 -W1 192.168.199.2 >/dev/null 2>&1 && break
@@ -232,8 +240,8 @@ while [ "$rep" -le "$REPS" ]; do
 		fi
 		ip netns exec "$N1" taskset -c "$CPU" iperf3 -c 192.168.199.2 \
 			-p 5301 $PAR -u $RATE -l "$len" -t "$DUR" -O 2 -J >"$TMP/out.json"
-		bps=$(jq -r '.end.sum.bits_per_second' "$TMP/out.json")
-		loss=$(jq -r '.end.sum.lost_percent // 0' "$TMP/out.json")
+		bps=$(jq -r '.end.sum_received.bits_per_second // .end.sum.bits_per_second' "$TMP/out.json")
+		loss=$(jq -r '.end.sum_received.lost_percent // .end.sum.lost_percent // 0' "$TMP/out.json")
 		;;
 	*)
 		echo "unknown case: $CASE" >&2
@@ -263,11 +271,19 @@ fi
 
 if [ -n "${UWG_STATS:-}" ]; then
 	ip netns exec "$N1" "$TOOL" show uw0 | sed -n '/peer/,/^$/p' | head -12
-	f=$(cc_file "$N1" || true)
-	[ -n "$f" ] && cat "$f"
+	for ns in "$N1" "$N2"; do
+		f=$(cc_file "$ns" || true)
+		if [ -n "$f" ]; then
+			printf -- '--- %s ---\n' "$ns"
+			cat "$f"
+		fi
+	done
 fi
 
-awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '
+	MEM=$(awk -v m="$MODULE" '$1 == m { printf "%.1f", $2 / 1048576 }' /proc/modules)
+[ -n "$MEM" ] || MEM=0
+
+awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" -v mem="$MEM" '
 { b[NR] = $2; p[NR] = $3; u[NR] = $4; l[NR] = $5 }
 END {
 	n = NR
@@ -280,5 +296,5 @@ END {
 				t = l[i]; l[i] = l[j]; l[j] = t
 			}
 	m = int((n + 1) / 2)
-	printf "%s\t%s\t%s\t%.3f\t%.0f\t%.1f\tlost %.2f%%\n", mode, cname, cpu, b[m] / 1e9, p[m], u[m], l[m]
+	printf "%s\t%s\t%s\t%.3f\t%.0f\t%.1f\tlost %.2f%%\tmem %.1f MiB\n", mode, cname, cpu, b[m] / 1e9, p[m], u[m], l[m], mem
 }' "$RESULT"

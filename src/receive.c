@@ -13,6 +13,7 @@
 #include "socket.h"
 #include "type.h"
 #include "frame.h"
+#include "tunnel.h"
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -462,7 +463,8 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 	struct wg_peer *routed_peer;
 	u8 buf, *p = skb_header_pointer(skb, 0, 1, &buf);
 
-	wg_socket_set_peer_endpoint(peer, endpoint);
+	if (!PACKET_CB(skb)->recovered)
+		wg_socket_set_peer_endpoint(peer, endpoint);
 
 	if (unlikely(wg_noise_received_with_keypair(&peer->keypairs,
 						    PACKET_CB(skb)->keypair))) {
@@ -475,19 +477,25 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 	wg_timers_any_authenticated_packet_received(peer);
 	wg_timers_any_authenticated_packet_traversal(peer);
 
-	if (static_branch_unlikely(&uwg_cc_bbr_active) && likely(p)) {
-		if (unlikely(*p == UWG_FRAME_MAGIC && skb->len >= 2)) {
-			u8 kind;
-
-			if (skb_copy_bits(skb, 1, &kind, 1) == 0 && kind &&
-			    uwg_cc_fb_rx(peer, skb, kind,
-					 PACKET_CB(skb)->nonce))
-				goto packet_processed;
-		} else if (likely(*p)) {
+	if (likely(p && *p)) {
+		if (static_branch_unlikely(&uwg_cc_bbr_active))
 			uwg_cc_fb_account(peer, skb,
 					  PACKET_CB(skb)->padding +
 					  MESSAGE_MINIMUM_LENGTH + skb->len,
 					  PACKET_CB(skb)->nonce);
+	} else {
+		u8 kind;
+
+		uwg_tunnel_rx_forget(peer, PACKET_CB(skb)->nonce);
+		if (p && *p == UWG_FRAME_MAGIC && skb->len >= 2 &&
+		    skb_copy_bits(skb, 1, &kind, 1) == 0 && kind) {
+			if (kind == UWG_FRAME_FEC_REPAIR) {
+				uwg_tunnel_rx(peer, skb);
+				goto packet_processed;
+			}
+			if (uwg_cc_fb_rx(peer, skb, kind,
+					 PACKET_CB(skb)->nonce))
+				goto packet_processed;
 		}
 	}
 
@@ -601,22 +609,29 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget)
 
 		if (unlikely(!counter_validate(&keypair->receiving_counter,
 					       PACKET_CB(skb)->nonce))) {
-			net_dbg_ratelimited("%s: Packet has invalid nonce %llu (max %llu)\n",
-					    peer->device->dev->name,
-					    PACKET_CB(skb)->nonce,
-					    READ_ONCE(keypair->receiving_counter.counter));
-			goto next;
+			if (unlikely(PACKET_CB(skb)->recovered))
+				atomic64_inc(&peer->tunnel.reinject_replay_fail);
+			else {
+				net_dbg_ratelimited("%s: Packet has invalid nonce %llu (max %llu)\n",
+						    peer->device->dev->name,
+						    PACKET_CB(skb)->nonce,
+						    READ_ONCE(keypair->receiving_counter.counter));
+				goto next;
+			}
 		}
 
-		if (unlikely(wg_socket_endpoint_from_skb(&endpoint, skb)))
-			goto next;
-
+		if (!PACKET_CB(skb)->recovered) {
+			if (unlikely(wg_socket_endpoint_from_skb(&endpoint, skb)))
+				goto next;
+		}
 
 		udp_window = PACKET_CB(skb)->padding + MESSAGE_MINIMUM_LENGTH + skb->len;
 		if (READ_ONCE(peer->udp_window) < udp_window)
 			WRITE_ONCE(peer->udp_window, udp_window);
 
 		wg_reset_packet(skb, false);
+		if (unlikely(PACKET_CB(skb)->recovered))
+			atomic64_inc(&peer->tunnel.reinject_delivered);
 		wg_packet_consume_data_done(peer, skb, &endpoint);
 		free = false;
 
@@ -677,11 +692,14 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 	}
 }
 
-static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
+void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb,
+			    bool recovered)
 {
 	__le32 idx = ((struct message_data *)skb->data)->key_idx;
 	struct wg_peer *peer = NULL;
 	int ret;
+
+	PACKET_CB(skb)->recovered = recovered;
 
 	rcu_read_lock_bh();
 	PACKET_CB(skb)->keypair =
@@ -693,6 +711,9 @@ static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
 
 	if (unlikely(READ_ONCE(peer->is_dead)))
 		goto err;
+
+	if (unlikely(READ_ONCE(peer->tunnel.fec_k)) && !recovered)
+		uwg_tunnel_rx_record(peer, skb);
 
 	ret = wg_queue_enqueue_per_device_and_peer(&wg->decrypt_queue, &peer->rx_queue, skb,
 						   wg->packet_crypt_wq);
@@ -748,7 +769,7 @@ void wg_packet_receive(struct wg_device *wg, struct sk_buff *skb)
 	}
 	case MESSAGE_DATA:
 		PACKET_CB(skb)->ds = ip_tunnel_get_dsfield(ip_hdr(skb), skb);
-		wg_packet_consume_data(wg, skb);
+		wg_packet_consume_data(wg, skb, false);
 		break;
 	default:
 		WARN(1, "Non-exhaustive parsing of packet header lead to unknown packet type!\n");

@@ -11,6 +11,7 @@
 #include "peer.h"
 #include "socket.h"
 #include "messages.h"
+#include "tunnel.h"
 #include "cookie.h"
 #include "type.h"
 
@@ -219,7 +220,7 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 	return padded_size - last_unit;
 }
 
-static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
+bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 {
 	struct wg_peer *peer = keypair->entry.peer;
 	unsigned int padding_len, plaintext_len, trailer_len, packet_len;
@@ -243,7 +244,8 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	/* Force hash calculation before encryption so that flow analysis is
 	 * consistent over the inner packet.
 	 */
-	if (likely(!PACKET_CB(skb)->is_service))
+	if (likely(!PACKET_CB(skb)->is_service &&
+		   !PACKET_CB(skb)->no_account))
 		skb_get_hash(skb);
 
 	/* Calculate lengths. */
@@ -318,6 +320,7 @@ void wg_packet_send_keepalive(struct wg_peer *peer)
 			return;
 		skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
 		skb->dev = peer->device->dev;
+		memset(PACKET_CB(skb), 0, sizeof(struct packet_cb));
 		PACKET_CB(skb)->mtu = skb->dev->mtu;
 		PACKET_CB(skb)->is_keepalive = true;
 		skb_queue_tail(&peer->staged_packet_queue, skb);
@@ -331,6 +334,7 @@ void wg_packet_send_keepalive(struct wg_peer *peer)
 
 static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *first)
 {
+	struct noise_keypair *keypair = PACKET_CB(first)->keypair;
 	struct sk_buff *skb, *next;
 	bool data_sent = false;
 
@@ -338,17 +342,23 @@ static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *fir
 	wg_timers_any_authenticated_packet_sent(peer);
 	skb_list_walk_safe(first, skb, next) {
 		bool is_keepalive = PACKET_CB(skb)->is_keepalive;
+		bool fec_staged = false;
+
+		if (likely(!is_keepalive && !PACKET_CB(skb)->is_service))
+			fec_staged = uwg_tunnel_tx_data(peer, skb, keypair);
 
 		if (static_branch_unlikely(&uwg_cc_active) &&
 		    unlikely(READ_ONCE(peer->cc.mode) != UWG_CC_NONE)) {
 			uwg_cc_tx(peer, skb);
 			if (!is_keepalive)
 				data_sent = true;
-			continue;
-		}
-		if (likely(!wg_socket_send_skb_to_peer(peer, skb,
-				PACKET_CB(skb)->ds) && !is_keepalive))
+		} else if (likely(!wg_socket_send_skb_to_peer(peer, skb,
+				PACKET_CB(skb)->ds) && !is_keepalive)) {
 			data_sent = true;
+		}
+
+		if (unlikely(fec_staged))
+			uwg_tunnel_tx_flush(peer, keypair);
 	}
 
 	if (likely(data_sent))

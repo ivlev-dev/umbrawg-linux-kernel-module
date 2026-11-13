@@ -27,6 +27,7 @@ static struct sk_buff *uwg_cc_make_skb(struct wg_peer *peer, const u8 *buf,
 	skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
 	skb_put_data(skb, buf, len);
 	skb->dev = peer->device->dev;
+	memset(PACKET_CB(skb), 0, sizeof(struct packet_cb));
 	PACKET_CB(skb)->mtu = peer->device->dev->mtu;
 	PACKET_CB(skb)->is_service = true;
 	PACKET_CB(skb)->ds = 0;
