@@ -38,6 +38,10 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget);
 /* Workqueue worker: */
 void wg_packet_decrypt_worker(struct work_struct *work);
 
+/* helpers shared with the tunnel layer: */
+bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair);
+void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb);
+
 /* send.c APIs: */
 void wg_packet_send_queued_handshake_initiation(struct wg_peer *peer,
 						bool is_retry);
@@ -68,6 +72,7 @@ struct packet_cb {
 	u32 padding;
 	u8 ds;
 	u32 flow_hash;
+	bool recovered;
 	bool is_keepalive;
 	bool parallel;
 };

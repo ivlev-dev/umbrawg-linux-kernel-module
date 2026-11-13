@@ -27,6 +27,7 @@ UWG_MODULE_OPTS=${UWG_MODULE_OPTS:-}
 UWG_OPTS_FILE=${UWG_OPTS_FILE:-}
 UWG_CC=${UWG_CC:-}
 UWG_NETEM=${UWG_NETEM:-}
+UWG_FEC=${UWG_FEC:-}
 UWG_UDP_BITRATE=${UWG_UDP_BITRATE:-0}
 
 if [ "$MODE" = umbrawg ]; then
@@ -154,10 +155,11 @@ if [ -n "$UWG_NETEM" ]; then
 	ip netns exec "$N1" tc qdisc add dev uwv0 root netem loss "$UWG_NETEM"
 fi
 
-if [ -n "$UWG_CC" ]; then
+if [ -n "$UWG_CC" ] || [ -n "$UWG_FEC" ]; then
 	for ns in "$N1" "$N2"; do
 		f=$(cc_file "$ns" || true)
-		[ -n "$f" ] && printf '%s\n' "$UWG_CC" >"$f"
+		[ -n "$f" ] && [ -n "$UWG_CC" ] && printf '%s\n' "$UWG_CC" >"$f"
+		[ -n "$f" ] && [ -n "$UWG_FEC" ] && printf 'all fec %s\n' "$UWG_FEC" >"$f"
 	done
 fi
 
@@ -237,8 +239,11 @@ done
 
 if [ -n "${UWG_STATS:-}" ]; then
 	ip netns exec "$N1" "$TOOL" show uw0 | sed -n '/peer/,/^$/p' | head -12
-	f=$(cc_file "$N1" || true)
-	[ -n "$f" ] && cat "$f"
+	for ns in "$N1" "$N2"; do
+		echo "== $ns"
+		f=$(cc_file "$ns" || true)
+		[ -n "$f" ] && cat "$f"
+	done
 fi
 
 awk -v mode="$LABEL" -v cname="$CASE" -v cpu="$CPU" '

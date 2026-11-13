@@ -253,6 +253,7 @@ static void kref_release(struct kref *refcount)
 	 */
 	wg_packet_purge_staged_packets(peer);
 	uwg_cc_clear(peer);
+	uwg_tunnel_clear(peer);
 
 	/* Free the memory used. */
 	call_rcu(&peer->rcu, rcu_release);

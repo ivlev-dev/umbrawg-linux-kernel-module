@@ -11,6 +11,7 @@
 #include "peer.h"
 #include "socket.h"
 #include "messages.h"
+#include "tunnel.h"
 #include "cookie.h"
 #include "type.h"
 
@@ -219,7 +220,7 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 	return padded_size - last_unit;
 }
 
-static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
+bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 {
 	struct wg_peer *peer = keypair->entry.peer;
 	unsigned int padding_len, plaintext_len, trailer_len, packet_len;
@@ -337,6 +338,9 @@ static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *fir
 	wg_timers_any_authenticated_packet_sent(peer);
 	skb_list_walk_safe(first, skb, next) {
 		bool is_keepalive = PACKET_CB(skb)->is_keepalive;
+
+		if (unlikely(!is_keepalive))
+			uwg_tunnel_tx_data(peer, skb, PACKET_CB(first)->keypair);
 
 		if (static_branch_unlikely(&uwg_cc_active) &&
 		    unlikely(READ_ONCE(peer->cc.mode) != UWG_CC_NONE)) {

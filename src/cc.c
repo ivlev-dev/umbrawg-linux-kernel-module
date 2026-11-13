@@ -3,6 +3,7 @@
 #include "device.h"
 #include "peer.h"
 #include "queueing.h"
+#include "tunnel.h"
 #include "socket.h"
 
 #include <linux/debugfs.h>
@@ -364,13 +365,31 @@ static int uwg_cc_apply(struct wg_device *wg, u64 id, bool all,
 	return ret;
 }
 
+static int uwg_fec_apply(struct wg_device *wg, u64 id, bool all,
+			 unsigned int k, unsigned int m)
+{
+	struct wg_peer *peer;
+	int ret = 0;
+
+	mutex_lock(&wg->device_update_lock);
+	list_for_each_entry(peer, &wg->peer_list, peer_list) {
+		if (!all && peer->internal_id != id)
+			continue;
+		ret = uwg_fec_set(peer, k, m);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&wg->device_update_lock);
+	return ret;
+}
+
 static ssize_t uwg_cc_debugfs_write(struct file *file,
 				    const char __user *user_buf,
 				    size_t count, loff_t *ppos)
 {
 	struct wg_device *wg = netdev_priv(file_inode(file)->i_private);
-	char buf[64], mode_s[16] = {};
-	u64 id = 0, mbps = 0;
+	char buf[64], cmd[16] = {};
+	u64 id = 0, a = 0, b = 0;
 	enum uwg_cc_mode mode;
 	bool all;
 	int n;
@@ -383,22 +402,33 @@ static ssize_t uwg_cc_debugfs_write(struct file *file,
 
 	all = !strncmp(buf, "all", 3);
 	if (all)
-		n = sscanf(buf, "%*s %15s %llu", mode_s, &mbps);
+		n = sscanf(buf, "%*s %15s %llu %llu", cmd, &a, &b);
 	else
-		n = sscanf(buf, "%llu %15s %llu", &id, mode_s, &mbps);
+		n = sscanf(buf, "%llu %15s %llu %llu", &id, cmd, &a, &b);
 	if (n < 1)
 		return -EINVAL;
 
-	if (!strcmp(mode_s, "none"))
+	if (!strcmp(cmd, "fec")) {
+		n = uwg_fec_apply(wg, id, all, (unsigned int)a, (unsigned int)b);
+		return n < 0 ? n : count;
+	}
+	if (!strcmp(cmd, "off")) {
+		n = uwg_fec_apply(wg, id, all, 0, 0);
+		if (n < 0)
+			return n;
+		n = uwg_cc_apply(wg, id, all, UWG_CC_NONE, 0);
+		return n < 0 ? n : count;
+	}
+	if (!strcmp(cmd, "none"))
 		mode = UWG_CC_NONE;
-	else if (!strcmp(mode_s, "brutal"))
+	else if (!strcmp(cmd, "brutal"))
 		mode = UWG_CC_BRUTAL;
-	else if (!strcmp(mode_s, "bbr"))
+	else if (!strcmp(cmd, "bbr"))
 		mode = UWG_CC_BBR;
 	else
 		return -EINVAL;
 
-	n = uwg_cc_apply(wg, id, all, mode, mbps * 1000ULL * 1000ULL);
+	n = uwg_cc_apply(wg, id, all, mode, a * 1000ULL * 1000ULL);
 	if (n < 0)
 		return n;
 	return count;
@@ -415,9 +445,20 @@ static int uwg_cc_show(struct seq_file *seq, void *offset)
 
 	mutex_lock(&wg->device_update_lock);
 	list_for_each_entry(peer, &wg->peer_list, peer_list)
-		seq_printf(seq, "peer %llu %s %llu\n", peer->internal_id,
+		seq_printf(seq, "peer %llu %s %llu fec=%u/%u sent=%lld rx=%lld rec=%lld recovered=%lld fail=%lld\n",
+			   peer->internal_id,
 			   uwg_cc_mode_name(READ_ONCE(peer->cc.mode)),
-			   div_u64(READ_ONCE(peer->cc.rate_bps), 1000ULL * 1000ULL));
+			   div_u64(READ_ONCE(peer->cc.rate_bps), 1000ULL * 1000ULL),
+			   peer->tunnel.fec_k, peer->tunnel.fec_m,
+			   atomic64_read(&peer->tunnel.repairs_sent),
+			   atomic64_read(&peer->tunnel.repairs_rx),
+			   atomic64_read(&peer->tunnel.records),
+			   atomic64_read(&peer->tunnel.recovered),
+			   atomic64_read(&peer->tunnel.recover_fail));
+	seq_printf(seq, "  reinject: delivered=%lld decrypt_fail=%lld replay_fail=%lld\n",
+		   atomic64_read(&peer->tunnel.reinject_delivered),
+		   atomic64_read(&peer->tunnel.reinject_decrypt_fail),
+		   atomic64_read(&peer->tunnel.reinject_replay_fail));
 	mutex_unlock(&wg->device_update_lock);
 	return 0;
 }

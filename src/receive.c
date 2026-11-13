@@ -12,6 +12,7 @@
 #include "cookie.h"
 #include "socket.h"
 #include "type.h"
+#include "tunnel.h"
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -474,6 +475,11 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 	wg_timers_any_authenticated_packet_received(peer);
 	wg_timers_any_authenticated_packet_traversal(peer);
 
+	if (unlikely(p && *p == UWG_TUNNEL_MAGIC && uwg_tunnel_probe(skb))) {
+		uwg_tunnel_rx(peer, skb);
+		goto packet_processed;
+	}
+
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet
 	 */
@@ -584,6 +590,8 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget)
 
 		if (unlikely(!counter_validate(&keypair->receiving_counter,
 					       PACKET_CB(skb)->nonce))) {
+			if (unlikely(PACKET_CB(skb)->recovered))
+				atomic64_inc(&peer->tunnel.reinject_replay_fail);
 			net_dbg_ratelimited("%s: Packet has invalid nonce %llu (max %llu)\n",
 					    peer->device->dev->name,
 					    PACKET_CB(skb)->nonce,
@@ -600,6 +608,8 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget)
 			WRITE_ONCE(peer->udp_window, udp_window);
 
 		wg_reset_packet(skb, false);
+		if (unlikely(PACKET_CB(skb)->recovered))
+			atomic64_inc(&peer->tunnel.reinject_delivered);
 		wg_packet_consume_data_done(peer, skb, &endpoint);
 		free = false;
 
@@ -650,8 +660,13 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 			enum packet_state state;
 
 			skb = batch[i];
-			state = likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
-				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
+			if (likely(decrypt_packet(skb, PACKET_CB(skb)->keypair))) {
+				state = PACKET_STATE_CRYPTED;
+			} else {
+				state = PACKET_STATE_DEAD;
+				if (unlikely(PACKET_CB(skb)->recovered))
+					atomic64_inc(&PACKET_CB(skb)->keypair->entry.peer->tunnel.reinject_decrypt_fail);
+			}
 			wg_queue_enqueue_per_peer_rx(skb, state);
 		}
 
@@ -660,7 +675,7 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 	}
 }
 
-static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
+void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
 {
 	__le32 idx = ((struct message_data *)skb->data)->key_idx;
 	struct wg_peer *peer = NULL;
@@ -676,6 +691,9 @@ static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
 
 	if (unlikely(READ_ONCE(peer->is_dead)))
 		goto err;
+
+	if (unlikely(READ_ONCE(peer->tunnel.fec_k)))
+		uwg_tunnel_rx_record(peer, skb);
 
 	ret = wg_queue_enqueue_per_device_and_peer(&wg->decrypt_queue, &peer->rx_queue, skb,
 						   wg->packet_crypt_wq);
