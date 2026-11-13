@@ -13,7 +13,7 @@ enum uwg_frame_kind {
 	UWG_FRAME_CC_REQUEST	= 0x03,
 };
 
-#define UWG_CC_REQUEST_LEN	12
-#define UWG_CC_FEEDBACK_LEN	40
+#define UWG_CC_REQUEST_LEN	20
+#define UWG_CC_FEEDBACK_LEN	48
 
 #endif /* _UWG_FRAME_H */

@@ -42,7 +42,7 @@ static void uwg_cc_enqueue(struct wg_peer *peer, struct sk_buff *skb)
 	wg_packet_send_staged_packets(peer);
 }
 
-static void uwg_cc_fb_send(struct wg_peer *peer, u64 echo_ts)
+static void uwg_cc_fb_send(struct wg_peer *peer, u64 echo_ts, u64 echo_drops)
 {
 	struct uwg_cc *cc = &peer->cc;
 	u8 buf[UWG_CC_FEEDBACK_LEN];
@@ -57,6 +57,7 @@ static void uwg_cc_fb_send(struct wg_peer *peer, u64 echo_ts)
 	put_unaligned_le64(cc->fb.rx_packets, buf + 20);
 	put_unaligned_le32(0, buf + 28);
 	put_unaligned_le64(cc->fb.rx_highest, buf + 32);
+	put_unaligned_le64(echo_drops, buf + 40);
 
 	skb = uwg_cc_make_skb(peer, buf, sizeof(buf));
 	if (unlikely(!skb))
@@ -75,6 +76,7 @@ static void uwg_cc_fb_send_request(struct wg_peer *peer)
 	buf[2] = 0;
 	buf[3] = 0;
 	put_unaligned_le64(ktime_get_ns(), buf + 4);
+	put_unaligned_le64(READ_ONCE(peer->cc.dropped_packets), buf + 12);
 
 	skb = uwg_cc_make_skb(peer, buf, sizeof(buf));
 	if (unlikely(!skb))
@@ -108,7 +110,7 @@ static enum hrtimer_restart uwg_cc_fb_timer(struct hrtimer *timer)
 	if (unlikely(!wg_peer_get_maybe_zero(peer)))
 		return HRTIMER_NORESTART;
 
-	if (READ_ONCE(cc->mode) == UWG_CC_BBR && uwg_cc_peer_has_key(peer)) {
+	if (READ_ONCE(cc->mode) != UWG_CC_NONE && uwg_cc_peer_has_key(peer)) {
 		u64 last_rx = READ_ONCE(cc->fb.last_rx_ns);
 
 		uwg_cc_fb_send_request(peer);
@@ -120,6 +122,10 @@ static enum hrtimer_restart uwg_cc_fb_timer(struct hrtimer *timer)
 	if (READ_ONCE(cc->mode) == UWG_CC_BBR) {
 		uwg_cc_bbr_tick(cc, now);
 		WRITE_ONCE(cc->rate_bps, cc->bbr.pacing_bps);
+		cc->fb.armed = true;
+		restart = true;
+	} else if (READ_ONCE(cc->mode) == UWG_CC_BRUTAL) {
+		uwg_cc_brutal_tick(cc, now);
 		cc->fb.armed = true;
 		restart = true;
 	} else {
@@ -186,7 +192,7 @@ void uwg_cc_fb_account(struct wg_peer *peer, const struct sk_buff *skb,
 {
 	struct uwg_cc_fb *fb = &peer->cc.fb;
 
-	if (READ_ONCE(peer->cc.mode) != UWG_CC_BBR)
+	if (READ_ONCE(peer->cc.mode) == UWG_CC_NONE)
 		return;
 
 	fb->rx_bytes += wire_len;
@@ -200,30 +206,46 @@ bool uwg_cc_fb_rx(struct wg_peer *peer, const struct sk_buff *skb, u8 kind,
 	u8 buf[UWG_CC_FEEDBACK_LEN];
 	u64 now = ktime_get_ns();
 
-	if (READ_ONCE(peer->cc.mode) == UWG_CC_BBR)
-		uwg_cc_fb_note(&peer->cc.fb, nonce);
-
 	switch (kind) {
-	case UWG_FRAME_CC_REQUEST:
+	case UWG_FRAME_CC_REQUEST: {
+		u64 echo_drops;
+
 		if (unlikely(skb_copy_bits(skb, 0, buf,
 					   UWG_CC_REQUEST_LEN) < 0))
 			return true;
 		atomic64_inc(&peer->cc.fb.requests_rx);
-		uwg_cc_fb_send(peer, get_unaligned_le64(buf + 4));
+		echo_drops = get_unaligned_le64(buf + 12);
+		uwg_cc_fb_send(peer, get_unaligned_le64(buf + 4), echo_drops);
 		return true;
+	}
 	case UWG_FRAME_CC_FEEDBACK: {
-		u64 echo_ts, rtt;
+		u64 echo_ts, rtt, echo_drops;
 
 		if (unlikely(skb_copy_bits(skb, 0, buf,
 					   UWG_CC_FEEDBACK_LEN) < 0))
 			return true;
 		echo_ts = get_unaligned_le64(buf + 4);
 		rtt = now > echo_ts ? now - echo_ts : 0;
+		echo_drops = get_unaligned_le64(buf + 40);
 		atomic64_inc(&peer->cc.fb.feedback_rx);
 		WRITE_ONCE(peer->cc.fb.last_rx_ns, now);
-		uwg_cc_bbr_on_feedback(peer, rtt,
-				       get_unaligned_le64(buf + 12),
-				       get_unaligned_le64(buf + 20), now);
+		switch (READ_ONCE(peer->cc.mode)) {
+		case UWG_CC_BBR:
+			uwg_cc_bbr_on_feedback(peer, rtt,
+					       get_unaligned_le64(buf + 12),
+					       get_unaligned_le64(buf + 20),
+					       get_unaligned_le64(buf + 32),
+					       echo_drops, now);
+			break;
+		case UWG_CC_BRUTAL:
+			uwg_cc_brutal_on_feedback(peer, rtt,
+						  get_unaligned_le64(buf + 20),
+						  get_unaligned_le64(buf + 32),
+						  echo_drops, now);
+			break;
+		default:
+			break;
+		}
 		return true;
 	}
 	default:

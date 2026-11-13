@@ -36,6 +36,43 @@ const char *uwg_cc_mode_name(enum uwg_cc_mode mode)
 	return uwg_cc_names[mode];
 }
 
+/*
+ * Loss over one feedback interval. The peer reports the highest nonce it saw,
+ * so both the sent and the received side cover exactly the same set of
+ * packets; comparing bare counters sampled at different moments would report
+ * phantom loss equal to the feedback flight time. Packets dropped by our own
+ * pacing queue never hit the wire and are excluded.
+ */
+void uwg_cc_loss_update(struct uwg_cc *cc, u64 recv_highest, u64 recv_packets,
+			u64 echo_drops, u64 *acked, u64 *lost)
+{
+	struct uwg_cc_loss *l = &cc->loss;
+	u64 d_highest, d_rx, d_drop, sent;
+
+	*acked = 0;
+	*lost = 0;
+
+	if (!l->started || recv_highest < l->prev_highest ||
+	    recv_packets < l->prev_rx || echo_drops < l->prev_drop) {
+		l->prev_highest = recv_highest;
+		l->prev_rx = recv_packets;
+		l->prev_drop = echo_drops;
+		l->started = true;
+		return;
+	}
+
+	d_highest = recv_highest - l->prev_highest;
+	d_rx = recv_packets - l->prev_rx;
+	d_drop = echo_drops - l->prev_drop;
+	l->prev_highest = recv_highest;
+	l->prev_rx = recv_packets;
+	l->prev_drop = echo_drops;
+
+	sent = d_highest > d_drop ? d_highest - d_drop : 0;
+	*acked = min(d_rx, sent);
+	*lost = sent - *acked;
+}
+
 u32 uwg_cc_flow_hash(const struct sk_buff *skb)
 {
 	u32 a = 0, b = 0, c = 0, ports = 0;
@@ -80,9 +117,16 @@ u32 uwg_cc_flow_hash(const struct sk_buff *skb)
 	return jhash_2words(a ^ ports, b ^ c, 0x9e3779b9);
 }
 
+static u64 uwg_cc_pace_bps(const struct uwg_cc *cc)
+{
+	if (READ_ONCE(cc->mode) == UWG_CC_BRUTAL)
+		return READ_ONCE(cc->brutal.pace_bps);
+	return READ_ONCE(cc->rate_bps);
+}
+
 static u64 uwg_cc_cap_bytes(const struct wg_peer *peer)
 {
-	u64 rate = READ_ONCE(peer->cc.rate_bps);
+	u64 rate = uwg_cc_pace_bps(&peer->cc);
 	u64 cap;
 
 	if (!rate)
@@ -94,10 +138,25 @@ static u64 uwg_cc_cap_bytes(const struct wg_peer *peer)
 	return max_t(u64, cap, UWG_CC_MIN_CAP_BYTES);
 }
 
+/*
+ * Keep the pacing queue close to one path BDP: a deep queue turns into
+ * bufferbloat, inflates RTT for the inner transport and makes it back off
+ * long before the link is actually full.
+ */
+static unsigned int uwg_cc_max_queued(const struct uwg_cc *cc)
+{
+	u64 rate = uwg_cc_pace_bps(cc);
+	u64 q = div64_u64(rate * UWG_CC_QUEUE_NS,
+			 8 * 1400ULL * NSEC_PER_SEC);
+
+	return (unsigned int)clamp_t(u64, q, UWG_CC_MIN_QUEUED,
+				     UWG_CC_MAX_QUEUED);
+}
+
 static void uwg_cc_refill(struct wg_peer *peer, ktime_t now)
 {
 	struct uwg_cc *cc = &peer->cc;
-	u64 rate = READ_ONCE(cc->rate_bps);
+	u64 rate = uwg_cc_pace_bps(cc);
 	u64 dt;
 
 	if (!rate) {
@@ -154,7 +213,7 @@ static struct sk_buff *uwg_cc_pop_locked(struct uwg_cc *cc)
 static void uwg_cc_arm_locked(struct wg_peer *peer, u64 need_bytes)
 {
 	struct uwg_cc *cc = &peer->cc;
-	u64 rate = READ_ONCE(cc->rate_bps);
+	u64 rate = uwg_cc_pace_bps(cc);
 	u64 delay_ns;
 
 	if (!rate || cc->armed)
@@ -274,7 +333,7 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 	}
 
 	hrtimer_cancel(&cc->timer);
-	if (old == UWG_CC_BBR && mode != UWG_CC_BBR)
+	if (old != UWG_CC_NONE)
 		uwg_cc_fb_stop(peer);
 	spin_lock_bh(&cc->lock);
 	cc->armed = false;
@@ -286,6 +345,7 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 	cc->cursor = 0;
 	cc->tokens = 0;
 	cc->last = ktime_get();
+	memset(&cc->loss, 0, sizeof(cc->loss));
 	WRITE_ONCE(cc->mode, mode);
 	if (mode == UWG_CC_BBR) {
 		cc->sent_packets = 0;
@@ -298,10 +358,19 @@ int uwg_cc_set(struct wg_peer *peer, enum uwg_cc_mode mode, u64 rate_bps)
 		WRITE_ONCE(cc->rate_bps, cc->bbr.pacing_bps);
 	} else {
 		WRITE_ONCE(cc->rate_bps, mode == UWG_CC_NONE ? 0 : rate_bps);
+		if (mode == UWG_CC_BRUTAL) {
+			cc->sent_packets = 0;
+			cc->sent_bytes = 0;
+			cc->dropped_packets = 0;
+			cc->fb.rx_bytes = 0;
+			cc->fb.rx_packets = 0;
+			cc->fb.rx_highest = 0;
+			uwg_cc_brutal_reset(cc, rate_bps);
+		}
 	}
 	spin_unlock_bh(&cc->lock);
 
-	if (mode == UWG_CC_BBR)
+	if (mode != UWG_CC_NONE)
 		uwg_cc_fb_start(peer);
 
 	if (old == UWG_CC_NONE && mode != UWG_CC_NONE)
@@ -360,7 +429,7 @@ bool uwg_cc_tx(struct wg_peer *peer, struct sk_buff *skb)
 			 (skb->len > uwg_cc_cap_bytes(peer) && cc->tokens >= 0))) {
 		cc->tokens -= (s64)skb->len;
 		send_now = true;
-	} else if (cc->qlen >= UWG_CC_MAX_QUEUED) {
+	} else if (cc->qlen >= uwg_cc_max_queued(cc)) {
 		spin_unlock_bh(&cc->lock);
 		cc->dropped_packets++;
 		DEV_STATS_INC(peer->device->dev, tx_dropped);
@@ -469,6 +538,17 @@ static int uwg_cc_show(struct seq_file *seq, void *offset)
 		seq_printf(seq, "peer %llu %s %llu\n", peer->internal_id,
 			   uwg_cc_mode_name(READ_ONCE(cc->mode)),
 			   div_u64(READ_ONCE(cc->rate_bps), 1000ULL * 1000ULL));
+		if (READ_ONCE(cc->mode) == UWG_CC_BRUTAL) {
+			seq_printf(seq,
+				   "  brutal: base_bps=%llu pace_bps=%llu ack=%u%% rx=%llu/%llu qlen=%u\n",
+				   cc->brutal.base_bps, cc->brutal.pace_bps,
+				   cc->brutal.ack_pct, cc->fb.rx_bytes,
+				   cc->fb.rx_packets, READ_ONCE(cc->qlen));
+			seq_printf(seq, "  pacer: sent=%llu/%llu drop=%llu tokens=%lld\n",
+				   cc->sent_packets, cc->sent_bytes,
+				   cc->dropped_packets, cc->tokens);
+			continue;
+		}
 		if (READ_ONCE(cc->mode) != UWG_CC_BBR)
 			continue;
 		seq_printf(seq,

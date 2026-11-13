@@ -475,7 +475,7 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 	wg_timers_any_authenticated_packet_received(peer);
 	wg_timers_any_authenticated_packet_traversal(peer);
 
-	if (static_branch_unlikely(&uwg_cc_bbr_active) && likely(p)) {
+	if (static_branch_unlikely(&uwg_cc_active) && likely(p)) {
 		if (unlikely(*p == UWG_FRAME_MAGIC && skb->len >= 2)) {
 			u8 kind;
 
